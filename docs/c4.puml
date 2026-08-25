@@ -1,0 +1,18 @@
+@startuml c4
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+Person(client, "Внешний клиент", "HTTP-клиент курса, отправляет POST /api/{module}/{action} с JWT")
+
+System_Boundary(course, "Course week-1") {
+    Container(gateway, "gateway", "C# ASP.NET Core", "Публикует 8080; whitelist-прокси /api/*, /health/*, /openapi/*; форвардит контрактные заголовки")
+    Container(api, "api", "C# ASP.NET Core", "Generic action runtime: JWT -> context, schema validation, одна Npgsql транзакция -> api.invoke")
+    Container(cli, "cli", "C# console", "migration apply, action validate/publish/list/activate/disable")
+    ContainerDb(postgres, "postgres", "PostgreSQL 16", "action_catalog, idempotency_store, operations, operation_events, autocheck views")
+}
+
+Rel(client, gateway, "POST /api/{module}/{action}", "HTTPS/HTTP :8080")
+Rel(gateway, api, "forward по Compose DNS", "http://api:8080")
+Rel(api, postgres, "api.invoke, SELECT catalog", "Npgsql")
+Rel(cli, postgres, "migration apply, publish", "Npgsql")
+
+@enduml

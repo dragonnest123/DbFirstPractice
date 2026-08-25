@@ -1,0 +1,41 @@
+using Npgsql;
+
+namespace Api.Services;
+
+public sealed class DispatchService
+{
+    private readonly string _connStr;
+    private readonly ILogger<DispatchService> _logger;
+
+    public DispatchService(CatalogService catalog, ILogger<DispatchService> logger)
+    {
+        _connStr = catalog.ConnectionString;
+        _logger = logger;
+    }
+
+    public async Task LogAsync(string correlationId, string requestId, string module, string action, int version, string principal, string payloadHash, string status, string? outcome)
+    {
+        try
+        {
+            await using var conn = new NpgsqlConnection(_connStr);
+            await conn.OpenAsync();
+
+            await using var cmd = new NpgsqlCommand("INSERT INTO api.action_dispatches(correlation_id, request_id, module, action, version, principal, payload_hash, status, outcome) VALUES(@c,@r,@m,@a,@v,@p,@h,@s,@o) ON CONFLICT DO NOTHING", conn);
+            cmd.Parameters.AddWithValue("c", Guid.Parse(correlationId));
+            cmd.Parameters.AddWithValue("r", requestId);
+            cmd.Parameters.AddWithValue("m", module);
+            cmd.Parameters.AddWithValue("a", action);
+            cmd.Parameters.AddWithValue("v", version);
+            cmd.Parameters.AddWithValue("p", principal);
+            cmd.Parameters.AddWithValue("h", payloadHash);
+            cmd.Parameters.AddWithValue("s", status);
+            cmd.Parameters.AddWithValue("o", (object?)outcome ?? DBNull.Value);
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to record dispatch for correlation {CorrelationId} ({Module}.{Action} v{Version}, status {Status})", correlationId, module, action, version, status);
+        }
+    }
+}

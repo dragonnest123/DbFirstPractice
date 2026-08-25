@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: course
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./Api/Migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d course"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: .
+      dockerfile: Api/Dockerfile
+    environment:
+      COURSE_JWT_ISSUER: moduledev-course
+      COURSE_JWT_AUDIENCE: moduledev-api
+      COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY:-course-dev-signing-key-32-bytes-minimum!!!}
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_runtime;Password=runtime;Include Error Detail=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  cli:
+    build:
+      context: .
+      dockerfile: Cli/Dockerfile
+    environment:
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_migration;Password=migration;Include Error Detail=false
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:
