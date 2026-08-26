@@ -48,7 +48,7 @@ public sealed class CatalogService
         }
     }
 
-    public async Task<CatalogEntry?> ResolveAsync(string module, string action, int? explicitVersion)
+    public async Task<CatalogEntry?> GetOrDefault(string module, string action, int? explicitVersion)
     {
         await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync();

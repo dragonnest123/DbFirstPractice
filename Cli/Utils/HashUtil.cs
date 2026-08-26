@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace Cli;
+namespace Cli.Utils;
 
 public static class HashUtil
 {

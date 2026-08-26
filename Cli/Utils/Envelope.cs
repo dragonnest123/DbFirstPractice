@@ -1,8 +1,8 @@
 using System.Text.Json;
 
-namespace Cli;
+namespace Cli.Utils;
 
-public sealed class CliEnvelope
+public sealed class Envelope
 {
     private const string ContractVersion = "course-1";
 

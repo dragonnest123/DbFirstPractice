@@ -1,11 +1,28 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Json.Schema;
 
-namespace Api.Services;
+namespace Api.Utils;
 
-public static class SchemaValidator
+public static partial class ValidationUtil
 {
+    public static bool IsValidJson(string json)
+    {
+        try
+        {
+            using var _ = JsonDocument.Parse(json);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool IsValidSqlIdentifier(string value)
+        => SqlIdentifier().IsMatch(value);
+
     public static bool IsValid(JsonElement schema, string json)
     {
         try
@@ -33,4 +50,7 @@ public static class SchemaValidator
             return false;
         }
     }
+
+    [GeneratedRegex("^[a-z][a-z0-9_]{0,62}$", RegexOptions.Compiled)]
+    private static partial Regex SqlIdentifier();
 }

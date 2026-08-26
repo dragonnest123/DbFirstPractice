@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
 using Json.Schema;
 
-namespace Cli;
+namespace Cli.Utils;
 
 public static class ManifestValidator
 {

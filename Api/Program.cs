@@ -3,14 +3,14 @@ using Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSingleton<JwtValidator>();
+builder.Services.AddSingleton<JwtService>();
 builder.Services.AddSingleton<CatalogService>();
 builder.Services.AddSingleton<DispatchService>();
+builder.Services.AddSingleton<IdempotencyService>();
+builder.Services.AddSingleton<ActionInvoker>();
 
 var app = builder.Build();
 
-HealthEndpoints.Map(app);
-OpenApiEndpoints.Map(app);
-ActionEndpoints.Map(app);
+EndpointMappings.Map(app);
 
 app.Run();

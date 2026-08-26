@@ -33,4 +33,23 @@ public static class Envelope
             result,
             meta = new { correlationId, actionVersion }
         }, statusCode: 200);
+
+    public static IResult OkFromStored(string responseJson)
+    {
+        using var doc = JsonDocument.Parse(responseJson);
+
+        var root = doc.RootElement;
+        var outcome = root.TryGetProperty("outcome", out var oc) ? oc.GetString() : null;
+        var result = root.TryGetProperty("result", out var r) ? r.Clone() : default;
+        var correlationId = root.TryGetProperty("meta", out var meta)
+                            && meta.TryGetProperty("correlationId", out var cid)
+            ? cid.GetString() ?? ""
+            : "";
+        var actionVersion = root.TryGetProperty("meta", out meta)
+                            && meta.TryGetProperty("actionVersion", out var av) && av.TryGetInt32(out var v)
+            ? v
+            : 0;
+
+        return Ok(outcome ?? "ok", result, correlationId, actionVersion);
+    }
 }

@@ -1,8 +1,11 @@
-namespace Cli;
+using Cli.Services;
+using Cli.Utils;
+
+namespace Cli.Commands;
 
 public static class MigrationCommand
 {
-    public static async Task<int> ApplyAsync(string directory, CliEnvelope envelope)
+    public static async Task<int> Handle(string directory, MigrationService store, Envelope envelope)
     {
         if (!Directory.Exists(directory))
             return envelope.Error("request.invalid", $"migration directory not found: {directory}");
@@ -13,7 +16,6 @@ public static class MigrationCommand
         if (files.Length == 0)
             return envelope.Error("request.invalid", "no migration files found");
 
-        var store = new CatalogStore();
         var applied = new List<string>();
         var skipped = new List<string>();
 
