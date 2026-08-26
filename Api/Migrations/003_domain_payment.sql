@@ -79,7 +79,7 @@ BEGIN
             'operationId', v_op.operation_id::text,
             'requestId', v_op.request_id,
             'operationKind', v_op.operation_kind,
-            'amount', to_char(v_op.amount, 'FM9999999999999999.00'),
+            'amount', v_op.amount::text,
             'currency', v_op.currency,
             'status', v_op.status
         ),

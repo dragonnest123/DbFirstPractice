@@ -47,6 +47,8 @@ public static class ActionEndpoint
             return Envelope.Error("access.denied", "insufficient scope", false, correlationId, entry.Version, 403);
 
         var idempotencyKey = http.Request.Headers.TryGetValue("Idempotency-Key", out var values) ? values.ToString() : "";
+        if (idempotencyKey.Length > 128)
+            return Envelope.Error("request.invalid", "invalid idempotency key", false, correlationId, entry.Version, 400);
         if (entry.IdempotencyMode == "required" && string.IsNullOrEmpty(idempotencyKey))
             return Envelope.Error("idempotency.required", "missing key", false, correlationId, entry.Version, 400);
 
