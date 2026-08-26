@@ -1,7 +1,5 @@
 # NewProject — Week 1. Database-first action runtime
 
-Решение недели 1 ModuleDev: C# gateway и generic C# runtime, публикующие зарегистрированные PostgreSQL-функции как HTTP actions. Условие задания и контракты находятся в [task/](task/README.md).
-
 ## Решение
 
 ### Архитектура
