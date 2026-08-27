@@ -1,33 +1,39 @@
-using Cli.Services;
 using Cli.Utils;
+using Shared.Utils;
 
 namespace Cli.Commands;
 
-public static class DisableActionCommand
+public sealed class DisableActionCommand : ICommand
 {
-    public static async Task<int> Handle(string[] args, CatalogService store, Envelope envelope)
+    public string Name => "disable";
+    public string Usage => "action disable <module.action> --version <version> [--replacement-version <version>]";
+
+    public async Task<int> RunAsync(string[] args, CommandContext ctx)
     {
-        if (args.Length < 3 || args[1] != "--version")
-            return envelope.Error("request.invalid", "usage: action disable <module.action> --version <version> [--replacement-version <version>]");
-        if (!RouteUtil.TryParseRoute(args[0], out var module, out var action))
-            return envelope.Error("request.invalid", "invalid route, expected <module>.<action>");
-        if (!int.TryParse(args[2], out var version) || version < 1)
-            return envelope.Error("request.invalid", "invalid version");
+        if (!ArgParser.TryParse(args, out var positionals, out var flags)
+            || positionals.Length != 1
+            || !flags.TryGetValue("--version", out var rawVersion)
+            || !int.TryParse(rawVersion, out var version) || version < 1)
+            return ctx.Envelope.Error("request.invalid", $"usage: {Usage}");
+
+        if (!IdentifierUtil.TryParseRoute(positionals[0], out var module, out var action))
+            return ctx.Envelope.Error("request.invalid", "invalid route, expected <module>.<action>");
 
         int? replacement = null;
-        if (args.Length >= 5 && args[3] == "--replacement-version")
+        if (flags.TryGetValue("--replacement-version", out var rawReplacement))
         {
-            if (!int.TryParse(args[4], out var r) || r < 1)
-                return envelope.Error("request.invalid", "invalid replacement version");
+            if (!int.TryParse(rawReplacement, out var r) || r < 1)
+                return ctx.Envelope.Error("request.invalid", "invalid replacement version");
+            
             replacement = r;
         }
 
         try
         {
-            var route = await store.GetRouteAsync(module, action);
+            var route = await ctx.Store.GetRouteAsync(module, action);
             var target = route.FirstOrDefault(m => m.Version == version);
             if (target is null)
-                return envelope.Error("action.not_found", $"version {version} of {module}.{action} is not published");
+                return ctx.Envelope.Error("action.not_found", $"version {version} of {module}.{action} is not published");
 
             var remaining = route.Where(m => m.Enabled && m.Version != version).ToList();
             if (replacement is null)
@@ -35,7 +41,7 @@ public static class DisableActionCommand
                 if (target.IsDefault || remaining.Count == 0)
                 {
                     if (remaining.Count == 0)
-                        return envelope.Error("action.invalid", "replacement version required when route has no other enabled version");
+                        return ctx.Envelope.Error("action.invalid", "replacement version required when route has no other enabled version");
                     replacement = remaining.OrderBy(m => m.Version).First().Version;
                 }
             }
@@ -43,15 +49,19 @@ public static class DisableActionCommand
             {
                 var repl = remaining.FirstOrDefault(m => m.Version == replacement.Value);
                 if (repl is null)
-                    return envelope.Error("action.invalid", "replacement version not found or disabled");
+                    return ctx.Envelope.Error("action.invalid", "replacement version not found or disabled");
             }
 
-            await store.DisableAsync(module, action, version, replacement);
-            return envelope.Ok(new { resource = "action", operation = "disabled", key = $"{module}.{action}", version, replacementVersion = replacement });
+            await ctx.Store.DisableAsync(module, action, version, replacement);
+            
+            return ctx.Envelope.Ok(new
+            {
+                resource = "action", operation = "disabled", key = $"{module}.{action}", version, replacementVersion = replacement
+            });
         }
         catch (Exception ex)
         {
-            return envelope.Error("action.disable_failed", ex.Message);
+            return ctx.Envelope.Error("action.disable_failed", ex.Message);
         }
     }
 }

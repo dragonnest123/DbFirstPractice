@@ -1,6 +1,6 @@
 using System.Text.Json;
-using Api.Services;
-using Api.Utils;
+using Shared.Models;
+using Shared.Utils;
 
 namespace Api.Dto;
 
@@ -28,7 +28,7 @@ public sealed record RequestState(
         string consumer,
         string[] scopes,
         string payload,
-        CatalogEntry entry,
+        ActionManifest entry,
         int? explicitVersion,
         string connectionString,
         string idempotencyKey,

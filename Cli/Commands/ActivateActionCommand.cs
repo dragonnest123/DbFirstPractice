@@ -1,30 +1,37 @@
-using Cli.Services;
 using Cli.Utils;
+using Shared.Utils;
 
 namespace Cli.Commands;
 
-public static class ActivateActionCommand
+public sealed class ActivateActionCommand : ICommand
 {
-    public static async Task<int> Handle(string[] args, CatalogService store, Envelope envelope)
+    public string Name => "activate";
+    public string Usage => "action activate <module.action> --version <version>";
+
+    public async Task<int> RunAsync(string[] args, CommandContext ctx)
     {
-        if (args.Length < 3 || args[1] != "--version")
-            return envelope.Error("request.invalid", "usage: action activate <module.action> --version <version>");
-        if (!RouteUtil.TryParseRoute(args[0], out var module, out var action))
-            return envelope.Error("request.invalid", "invalid route, expected <module>.<action>");
-        if (!int.TryParse(args[2], out var version) || version < 1)
-            return envelope.Error("request.invalid", "invalid version");
+        if (!ArgParser.TryParse(args, out var positionals, out var flags)
+            || positionals.Length != 1
+            || !flags.TryGetValue("--version", out var rawVersion)
+            || !int.TryParse(rawVersion, out var version) || version < 1)
+            return ctx.Envelope.Error("request.invalid", $"usage: {Usage}");
+
+        if (!IdentifierUtil.TryParseRoute(positionals[0], out var module, out var action))
+            return ctx.Envelope.Error("request.invalid", "invalid route, expected <module>.<action>");
 
         try
         {
-            var existing = await store.FindManifestAsync(module, action, version);
+            var existing = await ctx.Store.FindManifestAsync(module, action, version);
             if (existing is null)
-                return envelope.Error("action.not_found", $"version {version} of {module}.{action} is not published");
-            await store.ActivateAsync(module, action, version);
-            return envelope.Ok(new { resource = "action", operation = "activated", key = $"{module}.{action}", version });
+                return ctx.Envelope.Error("action.not_found", $"version {version} of {module}.{action} is not published");
+            
+            await ctx.Store.ActivateAsync(module, action, version);
+            
+            return ctx.Envelope.Ok(new { resource = "action", operation = "activated", key = $"{module}.{action}", version });
         }
         catch (Exception ex)
         {
-            return envelope.Error("action.activate_failed", ex.Message);
+            return ctx.Envelope.Error("action.activate_failed", ex.Message);
         }
     }
 }

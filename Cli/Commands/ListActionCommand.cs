@@ -1,20 +1,26 @@
-using Cli.Services;
-using Cli.Utils;
-
 namespace Cli.Commands;
 
-public static class ListActionCommand
+public sealed class ListActionCommand : ICommand
 {
-    public static async Task<int> Handle(CatalogService store, Envelope envelope)
+    public string Name => "list";
+    public string Usage => "action list";
+
+    public async Task<int> RunAsync(string[] args, CommandContext ctx)
     {
+        if (args.Length != 0)
+            return ctx.Envelope.Error("request.invalid", $"usage: {Usage}");
+
         try
         {
-            var items = await store.ListAllAsync();
-            return envelope.Ok(new { items = items.Select(i => new { module = i.Module, action = i.Action, version = i.Version }).ToArray() });
+            var items = await ctx.Store.ListAllAsync();
+            return ctx.Envelope.Ok(new
+            {
+                items = items.Select(i => new { module = i.Module, action = i.Action, version = i.Version }).ToArray()
+            });
         }
         catch (Exception ex)
         {
-            return envelope.Error("action.list_failed", ex.Message);
+            return ctx.Envelope.Error("action.list_failed", ex.Message);
         }
     }
 }

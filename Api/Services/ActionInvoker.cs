@@ -2,6 +2,7 @@ using System.Text.Json;
 using Api.Dto;
 using Api.Utils;
 using Npgsql;
+using Shared.Models;
 
 namespace Api.Services;
 
@@ -16,7 +17,7 @@ public sealed class ActionInvoker
         _dispatch = dispatch;
     }
 
-    public async Task<IResult> InvokeAsync(RequestState s, CatalogEntry entry)
+    public async Task<IResult> InvokeAsync(RequestState s, ActionManifest entry)
     {
         try
         {
@@ -52,7 +53,7 @@ public sealed class ActionInvoker
                 return await HandleDomainErrorAsync(tx, s, root);
 
             var outcome = root.TryGetProperty("outcome", out var oc) ? oc.GetString() : null;
-            if (outcome is null || entry.Outcomes.EnumerateArray().All(x => x.GetString() != outcome))
+            if (outcome is null || entry.Outcomes.All(x => x != outcome))
                 return await HandleContractViolationAsync(tx, s, "unknown outcome", null);
 
             if (!root.TryGetProperty("result", out var result))

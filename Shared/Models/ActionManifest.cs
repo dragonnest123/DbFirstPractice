@@ -1,9 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace Cli.Models;
+namespace Shared.Models;
 
-public sealed record Manifest(
+public sealed record ActionManifest(
     string ContractVersion,
     string Module,
     string Action,
@@ -23,7 +23,7 @@ public sealed record Manifest(
 {
     public string Key => $"{Module}.{Action}";
 
-    public bool SameAs(Manifest other) =>
+    public bool SameAs(ActionManifest other) =>
         ContractVersion == other.ContractVersion
         && Module == other.Module
         && Action == other.Action
@@ -44,7 +44,7 @@ public sealed record Manifest(
     private static bool JsonEquals(JsonElement a, JsonElement b) =>
         JsonNode.DeepEquals(JsonNode.Parse(a.GetRawText()), JsonNode.Parse(b.GetRawText()));
 
-    public static bool TryLoad(string path, out Manifest? manifest, out string? error)
+    public static bool TryLoad(string path, out ActionManifest? manifest, out string? error)
     {
         manifest = null;
         error = null;
@@ -61,9 +61,10 @@ public sealed record Manifest(
         }
     }
 
-    public static Manifest FromRow(JsonElement row) => FromJson(row);
+    public static ActionManifest FromRow(JsonElement row) 
+        => FromJson(row);
 
-    private static Manifest FromJson(JsonElement root) =>
+    private static ActionManifest FromJson(JsonElement root) =>
         new(
             root.GetProperty("contract_version").GetString()!,
             root.GetProperty("module").GetString()!,

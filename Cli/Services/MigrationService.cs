@@ -16,9 +16,11 @@ public sealed class MigrationService
     {
         await using var conn = new NpgsqlConnection(_connStr);
         await conn.OpenAsync();
+        
         await using var cmd = new NpgsqlCommand(
             "SELECT checksum FROM public.schema_migrations WHERE filename=@f", conn);
         cmd.Parameters.AddWithValue("f", filename);
+        
         return (string?)await cmd.ExecuteScalarAsync();
     }
 
@@ -26,16 +28,22 @@ public sealed class MigrationService
     {
         await using var conn = new NpgsqlConnection(_connStr);
         await conn.OpenAsync();
+        
         await using var tx = await conn.BeginTransactionAsync();
+        
         try
         {
             await using var cmd = new NpgsqlCommand(sql, conn, tx);
+            
             await cmd.ExecuteNonQueryAsync();
+            
             await using var ins = new NpgsqlCommand(
                 "INSERT INTO public.schema_migrations(filename, checksum) VALUES(@f,@c)", conn, tx);
             ins.Parameters.AddWithValue("f", filename);
             ins.Parameters.AddWithValue("c", checksum);
+            
             await ins.ExecuteNonQueryAsync();
+            
             await tx.CommitAsync();
         }
         catch
@@ -49,6 +57,7 @@ public sealed class MigrationService
     {
         await using var conn = new NpgsqlConnection(_connStr);
         await conn.OpenAsync();
+        
         await using var cmd = new NpgsqlCommand(
             "DO $$ " +
             "DECLARE s text; " +
@@ -56,6 +65,7 @@ public sealed class MigrationService
             "FOR s IN SELECT n.nspname FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE r.rolname = current_user " +
             "LOOP EXECUTE format('GRANT USAGE ON SCHEMA %I TO course_owner', s); END LOOP; " +
             "END $$;", conn);
+        
         await cmd.ExecuteNonQueryAsync();
     }
 }

@@ -16,4 +16,8 @@
         <EmbeddedResource Include="Schemas/action-manifest.schema.json"/>
     </ItemGroup>
 
+    <ItemGroup>
+        <ProjectReference Include="..\Shared\Shared.csproj" />
+    </ItemGroup>
+
 </Project>

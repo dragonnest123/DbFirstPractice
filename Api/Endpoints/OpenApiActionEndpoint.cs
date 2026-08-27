@@ -1,16 +1,16 @@
 using System.Text.Json.Nodes;
-using Api.Services;
 using Npgsql;
+using Shared.Services;
 
 namespace Api.Endpoints;
 
 public static class OpenApiActionEndpoint
 {
-    public static async Task<IResult> Handle(string module, string action, int version, CatalogService catalog)
+    public static async Task<IResult> Handle(string module, string action, int version, ActionCatalogService actionCatalog)
     {
         try
         {
-            await using var conn = new NpgsqlConnection(catalog.ConnectionString);
+            await using var conn = new NpgsqlConnection(actionCatalog.ConnectionString);
             await conn.OpenAsync();
 
             await using var cmd =

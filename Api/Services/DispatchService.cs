@@ -1,4 +1,5 @@
 using Npgsql;
+using Shared.Services;
 
 namespace Api.Services;
 
@@ -7,9 +8,9 @@ public sealed class DispatchService
     private readonly string _connStr;
     private readonly ILogger<DispatchService> _logger;
 
-    public DispatchService(CatalogService catalog, ILogger<DispatchService> logger)
+    public DispatchService(ActionCatalogService actionCatalog, ILogger<DispatchService> logger)
     {
-        _connStr = catalog.ConnectionString;
+        _connStr = actionCatalog.ConnectionString;
         _logger = logger;
     }
 

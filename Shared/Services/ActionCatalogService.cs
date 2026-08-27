@@ -1,62 +1,106 @@
 using System.Text.Json;
-using Cli.Models;
 using Npgsql;
+using Shared.Models;
 
-namespace Cli.Services;
+namespace Shared.Services;
 
-public sealed class CatalogService
+public sealed class ActionCatalogService
 {
-    private readonly string _connStr;
-
-    public CatalogService()
-    {
-        _connStr = Environment.GetEnvironmentVariable("POSTGRES_CONNECTION")
-            ?? "Host=postgres;Port=5432;Database=course;Username=course_migration;Password=migration;Include Error Detail=false";
-    }
-
     private const string SelectColumns =
         "module, action, version, http_method, target_schema, target_function, " +
         "request_schema::text, response_schema::text, outcomes::text, required_policy::text, " +
         "idempotency_mode, idempotency_scope, timeout_ms, enabled, is_default, contract_version";
 
-    public async Task<Manifest?> FindManifestAsync(string module, string action, int version)
+    public string ConnectionString { get; }
+
+    public ActionCatalogService(string connectionString)
     {
-        await using var conn = new NpgsqlConnection(_connStr);
+        ConnectionString = connectionString;
+    }
+
+    public bool IsReady()
+    {
+        try
+        {
+            using var conn = new NpgsqlConnection(ConnectionString);
+            conn.Open();
+
+            using var cmd = new NpgsqlCommand("SELECT 1", conn);
+            cmd.ExecuteScalar();
+
+            using var cmd2 = new NpgsqlCommand("SELECT count(*) FROM api.action_catalog LIMIT 1", conn);
+            cmd2.ExecuteScalar();
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public async Task<ActionManifest?> FindManifestAsync(string module, string action, int version)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync();
+        
         await using var cmd = new NpgsqlCommand(
             $"SELECT {SelectColumns} FROM api.action_catalog WHERE module=@m AND action=@a AND version=@v", conn);
         cmd.Parameters.AddWithValue("m", module);
         cmd.Parameters.AddWithValue("a", action);
         cmd.Parameters.AddWithValue("v", version);
+        
         return await ReadRowAsync(cmd);
     }
 
-    public async Task<List<Manifest>> GetRouteAsync(string module, string action)
+    public async Task<ActionManifest?> GetOrDefault(string module, string action, int? explicitVersion)
     {
-        await using var conn = new NpgsqlConnection(_connStr);
+        await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync();
+
+        var sql = explicitVersion.HasValue
+            ? $"SELECT {SelectColumns} FROM api.action_catalog WHERE module=@m AND action=@a AND version=@v AND enabled=true"
+            : $"SELECT {SelectColumns} FROM api.action_catalog WHERE module=@m AND action=@a AND is_default=true AND enabled=true";
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("m", module);
+        cmd.Parameters.AddWithValue("a", action);
+        if (explicitVersion.HasValue)
+            cmd.Parameters.AddWithValue("v", explicitVersion.Value);
+
+        return await ReadRowAsync(cmd);
+    }
+
+    public async Task<List<ActionManifest>> GetRouteAsync(string module, string action)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync();
+        
         await using var cmd = new NpgsqlCommand(
             $"SELECT {SelectColumns} FROM api.action_catalog WHERE module=@m AND action=@a", conn);
         cmd.Parameters.AddWithValue("m", module);
         cmd.Parameters.AddWithValue("a", action);
+        
         return await ReadRowsAsync(cmd);
     }
 
     public async Task<bool> HasDefaultAsync(string module, string action)
     {
-        await using var conn = new NpgsqlConnection(_connStr);
+        await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync();
+        
         await using var cmd = new NpgsqlCommand(
             "SELECT EXISTS(SELECT 1 FROM api.action_catalog WHERE module=@m AND action=@a AND is_default)", conn);
         cmd.Parameters.AddWithValue("m", module);
         cmd.Parameters.AddWithValue("a", action);
+        
         return (bool)(await cmd.ExecuteScalarAsync())!;
     }
 
-    public async Task InsertManifestAsync(Manifest m)
+    public async Task InsertManifestAsync(ActionManifest m)
     {
-        await using var conn = new NpgsqlConnection(_connStr);
+        await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync();
+        
         await using var cmd = new NpgsqlCommand(
             "INSERT INTO api.action_catalog(module, action, version, http_method, target_schema, target_function, " +
             "request_schema, response_schema, outcomes, required_policy, idempotency_mode, idempotency_scope, " +
@@ -78,35 +122,43 @@ public sealed class CatalogService
         cmd.Parameters.AddWithValue("enabled", m.Enabled);
         cmd.Parameters.AddWithValue("is_default", m.IsDefault);
         cmd.Parameters.AddWithValue("cv", m.ContractVersion);
+        
         await cmd.ExecuteNonQueryAsync();
     }
 
     public async Task ActivateAsync(string module, string action, int version)
     {
-        await using var conn = new NpgsqlConnection(_connStr);
+        await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync();
+        
         await using var tx = await conn.BeginTransactionAsync();
+        
         await using var clear = new NpgsqlCommand(
             "UPDATE api.action_catalog SET is_default = false WHERE module=@m AND action=@a",
             conn, tx);
         clear.Parameters.AddWithValue("m", module);
         clear.Parameters.AddWithValue("a", action);
+        
         await clear.ExecuteNonQueryAsync();
+        
         await using var set = new NpgsqlCommand(
             "UPDATE api.action_catalog SET enabled = true, is_default = true WHERE module=@m AND action=@a AND version=@v",
             conn, tx);
         set.Parameters.AddWithValue("m", module);
         set.Parameters.AddWithValue("a", action);
         set.Parameters.AddWithValue("v", version);
+        
         await set.ExecuteNonQueryAsync();
         await tx.CommitAsync();
     }
 
     public async Task DisableAsync(string module, string action, int version, int? replacement)
     {
-        await using var conn = new NpgsqlConnection(_connStr);
+        await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync();
+        
         await using var tx = await conn.BeginTransactionAsync();
+        
         if (replacement.HasValue)
         {
             await using var clear = new NpgsqlCommand(
@@ -114,51 +166,64 @@ public sealed class CatalogService
                 conn, tx);
             clear.Parameters.AddWithValue("m", module);
             clear.Parameters.AddWithValue("a", action);
+            
             await clear.ExecuteNonQueryAsync();
+            
             await using var set = new NpgsqlCommand(
                 "UPDATE api.action_catalog SET enabled = true, is_default = true WHERE module=@m AND action=@a AND version=@r",
                 conn, tx);
             set.Parameters.AddWithValue("m", module);
             set.Parameters.AddWithValue("a", action);
             set.Parameters.AddWithValue("r", replacement.Value);
+            
             await set.ExecuteNonQueryAsync();
         }
+        
         await using var off = new NpgsqlCommand(
             "UPDATE api.action_catalog SET enabled = false WHERE module=@m AND action=@a AND version=@v",
             conn, tx);
         off.Parameters.AddWithValue("m", module);
         off.Parameters.AddWithValue("a", action);
         off.Parameters.AddWithValue("v", version);
+        
         await off.ExecuteNonQueryAsync();
         await tx.CommitAsync();
     }
 
     public async Task<List<(string Module, string Action, int Version)>> ListAllAsync()
     {
-        await using var conn = new NpgsqlConnection(_connStr);
+        await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync();
+        
         await using var cmd = new NpgsqlCommand(
             "SELECT module, action, version FROM api.action_catalog ORDER BY module, action, version", conn);
+        
         await using var r = await cmd.ExecuteReaderAsync();
+        
         var items = new List<(string, string, int)>();
         while (await r.ReadAsync())
             items.Add((r.GetString(0), r.GetString(1), r.GetInt32(2)));
+        
         return items;
     }
 
-    private static async Task<Manifest?> ReadRowAsync(NpgsqlCommand cmd)
+    private static async Task<ActionManifest?> ReadRowAsync(NpgsqlCommand cmd)
     {
         await using var r = await cmd.ExecuteReaderAsync();
-        if (!await r.ReadAsync()) return null;
-        return Manifest.FromRow(JsonDocument.Parse(RowToJson(r)).RootElement);
+        if (!await r.ReadAsync())
+            return null;
+        
+        return ActionManifest.FromRow(JsonDocument.Parse(RowToJson(r)).RootElement);
     }
 
-    private static async Task<List<Manifest>> ReadRowsAsync(NpgsqlCommand cmd)
+    private static async Task<List<ActionManifest>> ReadRowsAsync(NpgsqlCommand cmd)
     {
         await using var r = await cmd.ExecuteReaderAsync();
-        var list = new List<Manifest>();
+        
+        var list = new List<ActionManifest>();
         while (await r.ReadAsync())
-            list.Add(Manifest.FromRow(JsonDocument.Parse(RowToJson(r)).RootElement));
+            list.Add(ActionManifest.FromRow(JsonDocument.Parse(RowToJson(r)).RootElement));
+        
         return list;
     }
 
@@ -172,16 +237,23 @@ public sealed class CatalogService
         };
         var jsonb = new HashSet<string> { "request_schema", "response_schema", "outcomes", "required_policy" };
         var sb = new System.Text.StringBuilder("{");
+        
         for (var i = 0; i < columns.Length; i++)
         {
-            if (i > 0) sb.Append(',');
+            if (i > 0) 
+                sb.Append(',');
+            
             sb.Append('"').Append(columns[i]).Append("\":");
+            
             var value = r.IsDBNull(i) ? null : r.GetValue(i);
+            
             sb.Append(jsonb.Contains(columns[i]) && value is string s
                 ? JsonDocument.Parse(s).RootElement.GetRawText()
                 : JsonSerializer.Serialize(value));
         }
+        
         sb.Append('}');
+        
         return sb.ToString();
     }
 }

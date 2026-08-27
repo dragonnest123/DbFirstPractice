@@ -12,6 +12,7 @@ public static class ManifestValidator
         using var stream = typeof(ManifestValidator).Assembly
             .GetManifestResourceStream("Cli.Schemas.action-manifest.schema.json")
             ?? throw new InvalidOperationException("embedded manifest schema not found");
+        
         using var reader = new StreamReader(stream);
         return JsonSchema.FromText(reader.ReadToEnd());
     }

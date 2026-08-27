@@ -1,6 +1,9 @@
 using Api.Dto;
 using Api.Services;
 using Api.Utils;
+using Shared.Models;
+using Shared.Services;
+using Shared.Utils;
 
 namespace Api.Endpoints;
 
@@ -11,7 +14,7 @@ public static class ActionEndpoint
         string module,
         string action,
         JwtService jwt,
-        CatalogService catalogService,
+        ActionCatalogService actionCatalogService,
         ActionInvoker invoker)
     {
         var correlationId = Guid.NewGuid().ToString();
@@ -20,7 +23,7 @@ public static class ActionEndpoint
         if (!ValidationUtil.IsValidJson(payload))
             return Envelope.Error("request.invalid", "invalid json", false, correlationId, null, 400);
 
-        if (!ValidationUtil.IsValidSqlIdentifier(module) || !ValidationUtil.IsValidSqlIdentifier(action))
+        if (!IdentifierUtil.IsValidSqlIdentifier(module) || !IdentifierUtil.IsValidSqlIdentifier(action))
             return Envelope.Error("request.invalid", "invalid route", false, correlationId, null, 400);
 
         if (!HttpUtil.TryParseVersion(http.Request, out var explicitVersion))
@@ -30,10 +33,10 @@ public static class ActionEndpoint
             || !JwtService.TryGetAuthContext(claims, out var auth))
             return Envelope.Error("auth.invalid", "invalid token", false, correlationId, explicitVersion, 401);
 
-        CatalogEntry? entry;
+        ActionManifest? entry;
         try
         {
-            entry = await catalogService.GetOrDefault(module, action, explicitVersion);
+            entry = await actionCatalogService.GetOrDefault(module, action, explicitVersion);
         }
         catch
         {
@@ -68,7 +71,7 @@ public static class ActionEndpoint
             payload,
             entry,
             explicitVersion,
-            catalogService.ConnectionString,
+            actionCatalogService.ConnectionString,
             idempotencyKey,
             scopeKey);
 

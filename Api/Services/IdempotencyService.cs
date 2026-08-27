@@ -1,6 +1,7 @@
 using Api.Dto;
 using Api.Utils;
 using Npgsql;
+using Shared.Models;
 
 namespace Api.Services;
 
@@ -13,7 +14,7 @@ public sealed class IdempotencyService
         _logger = logger;
     }
 
-    public static string? BuildScopeKey(CatalogEntry entry, string principal, string consumer, string module, string action)
+    public static string? BuildScopeKey(ActionManifest entry, string principal, string consumer, string module, string action)
         => entry.IdempotencyScope switch
         {
             "principal_action" => $"{principal}:{module}.{action}",

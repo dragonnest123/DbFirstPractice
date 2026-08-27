@@ -1,6 +1,7 @@
 ﻿using Cli.Commands;
 using Cli.Services;
 using Cli.Utils;
+using Shared.Services;
 
 namespace Cli;
 
@@ -8,24 +9,35 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
-        var envelope = new Envelope();
-        if (args.Length == 0)
-            return envelope.Error("request.invalid", "missing command");
+        var ctx = new CommandContext
+        {
+            Envelope = new Envelope(),
+            Store = new ActionCatalogService(
+                Environment.GetEnvironmentVariable("POSTGRES_CONNECTION")
+                ?? "Host=postgres;Port=5432;Database=course;Username=course_migration;Password=migration;Include Error Detail=false"),
+            Migrations = new MigrationService()
+        };
+
+        var router = new CommandRouter("cli", "cli <action|migration> ...", [
+            new CommandRouter("action", "action <validate|publish|list|activate|disable> ...", [
+                new ValidateActionCommand(),
+                new PublishActionCommand(),
+                new ListActionCommand(),
+                new ActivateActionCommand(),
+                new DisableActionCommand()
+            ]),
+            new CommandRouter("migration", "migration apply <directory>", [
+                new ApplyMigrationCommand()
+            ])
+        ]);
 
         try
         {
-            var catalog = new CatalogService();
-            var migrations = new MigrationService();
-            return args[0] switch
-            {
-                "migration" when args.Length >= 3 && args[1] == "apply" => await MigrationCommand.Handle(args[2], migrations, envelope),
-                "action" => await ActionCommand.Handle(args[1..], catalog, envelope),
-                _ => envelope.Error("request.invalid", $"unknown command: {string.Join(' ', args)}")
-            };
+            return await router.RunAsync(args, ctx);
         }
         catch (Exception ex)
         {
-            return envelope.Error("internal.error", ex.Message);
+            return ctx.Envelope.Error("internal.error", ex.Message);
         }
     }
 }

@@ -1,14 +1,13 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace Api.Utils;
+namespace Shared.Utils;
 
 public static class HashUtil
 {
-    public static string Sha256Hex(string s)
+    public static string Sha256Hex(string value)
     {
-        var bytes = Encoding.UTF8.GetBytes(s);
-        var hash = SHA256.HashData(bytes);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(value));
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 }

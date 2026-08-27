@@ -2,4 +2,5 @@
   <Project Path="Api/Api.csproj" />
   <Project Path="Cli/Cli.csproj" />
   <Project Path="Gateway/Gateway.csproj" />
+  <Project Path="Shared/Shared.csproj" />
 </Solution>

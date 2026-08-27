@@ -1,16 +1,24 @@
-using Cli.Models;
 using Cli.Utils;
+using Shared.Models;
 
 namespace Cli.Commands;
 
-public static class ValidateActionCommand
+public sealed class ValidateActionCommand : ICommand
 {
-    public static async Task<int> Handle(string path, Envelope envelope)
+    public string Name => "validate";
+    public string Usage => "action validate <manifest.json>";
+
+    public Task<int> RunAsync(string[] args, CommandContext ctx)
     {
-        if (!ManifestValidator.IsValid(path))
-            return envelope.Error("manifest.invalid", "manifest does not match schema");
-        if (!Manifest.TryLoad(path, out var manifest, out var error))
-            return envelope.Error("manifest.invalid", error ?? "cannot read manifest");
-        return envelope.Ok(new { resource = "action", operation = "validated", key = manifest!.Key, version = manifest.Version });
+        if (args.Length != 1)
+            return Task.FromResult(ctx.Envelope.Error("request.invalid", $"usage: {Usage}"));
+
+        if (!ManifestValidator.IsValid(args[0]))
+            return Task.FromResult(ctx.Envelope.Error("manifest.invalid", "manifest does not match schema"));
+        if (!ActionManifest.TryLoad(args[0], out var manifest, out var error))
+            return Task.FromResult(ctx.Envelope.Error("manifest.invalid", error ?? "cannot read manifest"));
+
+        return Task.FromResult(ctx.Envelope.Ok(
+            new { resource = "action", operation = "validated", key = manifest!.Key, version = manifest.Version }));
     }
 }
