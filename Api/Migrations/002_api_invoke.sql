@@ -53,18 +53,26 @@ BEGIN
     v_target_schema := v_catalog.target_schema;
     v_target_func := v_catalog.target_function;
 
-    v_required := COALESCE(v_catalog.required_policy, '[]'::jsonb);
-    FOR v_needed IN SELECT jsonb_array_elements_text(v_required)
-    LOOP
-        SELECT EXISTS(SELECT 1 FROM jsonb_array_elements_text(v_scopes) s WHERE s = v_needed) INTO v_has_scope;
-        IF NOT v_has_scope THEN
-            RETURN jsonb_build_object(
-                'status','error','code','access.denied','message','insufficient policy',
-                'retryable', false, 'details','{}'::jsonb,
-                'meta', jsonb_build_object('correlationId', v_correlation, 'actionVersion', v_effective_version)
-            );
-        END IF;
-    END LOOP;
+    BEGIN
+        v_required := COALESCE(v_catalog.required_policy, '[]'::jsonb);
+        FOR v_needed IN SELECT jsonb_array_elements_text(v_required)
+        LOOP
+            SELECT EXISTS(SELECT 1 FROM jsonb_array_elements_text(v_scopes) s WHERE s = v_needed) INTO v_has_scope;
+            IF NOT v_has_scope THEN
+                RETURN jsonb_build_object(
+                    'status','error','code','access.denied','message','insufficient policy',
+                    'retryable', false, 'details','{}'::jsonb,
+                    'meta', jsonb_build_object('correlationId', v_correlation, 'actionVersion', v_effective_version)
+                );
+            END IF;
+        END LOOP;
+    EXCEPTION WHEN OTHERS THEN
+        RETURN jsonb_build_object(
+            'status','error','code','internal.error','message','invalid policy context',
+            'retryable', false, 'details','{}'::jsonb,
+            'meta', jsonb_build_object('correlationId', v_correlation, 'actionVersion', v_effective_version)
+        );
+    END;
 
     SELECT p.oid INTO v_func_oid
     FROM pg_proc p

@@ -58,7 +58,7 @@ docker compose up -d --build
 Открытая проверка собирает контур, публикует fixture-actions (`opencheck.probe`), гоняет матрицу безопасности/контрактов/идемпотентности и пишет `week-1-public-report.json` в корень. Также доступны smoke-тесты CLI:
 
 ```bash
-./course.sh action validate task/autocheck/fixtures/manifests/opencheck-probe-v1.action.json
+./course.sh action validate /autocheck/input/manifests/opencheck-probe-v1.action.json
 ```
 
 ### Диагностика

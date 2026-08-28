@@ -7,6 +7,7 @@ AS $$
 DECLARE
     v_request_id text := p_context ->> 'requestId';
     v_correlation text := p_context ->> 'correlationId';
+    v_principal text := p_context ->> 'principal';
     v_operation_kind text := p_payload ->> 'operationKind';
     v_amount text := p_payload ->> 'amount';
     v_currency text := p_payload ->> 'currency';
@@ -28,8 +29,8 @@ BEGIN
 
     v_operation_id := gen_random_uuid();
 
-    INSERT INTO payment.operations(operation_id, request_id, operation_kind, amount, currency, status, process_id)
-    VALUES (v_operation_id, v_request_id, v_operation_kind, v_amount_num, v_currency, 'CREATED', NULL);
+    INSERT INTO payment.operations(operation_id, request_id, principal, operation_kind, amount, currency, status, process_id)
+    VALUES (v_operation_id, v_request_id, v_principal, v_operation_kind, v_amount_num, v_currency, 'CREATED', NULL);
 
     INSERT INTO payment.operation_events(event_id, operation_id, event_type, payload_hash)
     VALUES (gen_random_uuid(), v_operation_id, 'OPERATION_CREATED', v_payload_hash);

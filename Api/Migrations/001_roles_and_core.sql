@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS api.idempotency_store (
 CREATE TABLE IF NOT EXISTS payment.operations (
     operation_id uuid PRIMARY KEY,
     request_id text NOT NULL,
+    principal text NOT NULL,
     operation_kind text NOT NULL CHECK (operation_kind IN ('PAYMENT_EXECUTION','PAYMENT_APPROVAL')),
     amount numeric(20,2) NOT NULL CHECK (amount >= 0.01 AND amount <= 9999999999999999.99),
     currency text NOT NULL CHECK (currency = 'RUB'),
@@ -88,7 +89,8 @@ CREATE TABLE IF NOT EXISTS payment.operations (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_operations_request ON payment.operations(request_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_operations_scope_request ON payment.operations(principal, request_id);
+CREATE INDEX IF NOT EXISTS ix_operations_request ON payment.operations(request_id);
 CREATE INDEX IF NOT EXISTS ix_operations_kind ON payment.operations(operation_kind);
 
 CREATE TABLE IF NOT EXISTS payment.operation_events (

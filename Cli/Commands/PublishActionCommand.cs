@@ -14,6 +14,8 @@ public sealed class PublishActionCommand : ICommand
             return ctx.Envelope.Error("request.invalid", $"usage: {Usage}");
 
         var path = args[0];
+        if (!File.Exists(path))
+            return ctx.Envelope.Error("manifest.notfound", $"manifest file not found: {path}");
         if (!ManifestValidator.IsValid(path))
             return ctx.Envelope.Error("manifest.invalid", "manifest does not match schema");
         if (!ActionManifest.TryLoad(path, out var manifest, out var error))

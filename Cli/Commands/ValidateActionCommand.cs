@@ -13,6 +13,8 @@ public sealed class ValidateActionCommand : ICommand
         if (args.Length != 1)
             return Task.FromResult(ctx.Envelope.Error("request.invalid", $"usage: {Usage}"));
 
+        if (!File.Exists(args[0]))
+            return Task.FromResult(ctx.Envelope.Error("manifest.notfound", $"manifest file not found: {args[0]}"));
         if (!ManifestValidator.IsValid(args[0]))
             return Task.FromResult(ctx.Envelope.Error("manifest.invalid", "manifest does not match schema"));
         if (!ActionManifest.TryLoad(args[0], out var manifest, out var error))
