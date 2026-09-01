@@ -39,20 +39,6 @@ public sealed class ActionCatalogService
         }
     }
 
-    public async Task<ActionManifest?> FindManifestAsync(string module, string action, int version)
-    {
-        await using var conn = new NpgsqlConnection(ConnectionString);
-        await conn.OpenAsync();
-        
-        await using var cmd = new NpgsqlCommand(
-            $"SELECT {SelectColumns} FROM api.action_catalog WHERE module=@m AND action=@a AND version=@v", conn);
-        cmd.Parameters.AddWithValue("m", module);
-        cmd.Parameters.AddWithValue("a", action);
-        cmd.Parameters.AddWithValue("v", version);
-        
-        return await ReadRowAsync(cmd);
-    }
-
     public async Task<ActionManifest?> GetOrDefault(string module, string action, int? explicitVersion)
     {
         await using var conn = new NpgsqlConnection(ConnectionString);
@@ -81,113 +67,6 @@ public sealed class ActionCatalogService
         cmd.Parameters.AddWithValue("a", action);
         
         return await ReadRowsAsync(cmd);
-    }
-
-    public async Task<bool> HasDefaultAsync(string module, string action)
-    {
-        await using var conn = new NpgsqlConnection(ConnectionString);
-        await conn.OpenAsync();
-        
-        await using var cmd = new NpgsqlCommand(
-            "SELECT EXISTS(SELECT 1 FROM api.action_catalog WHERE module=@m AND action=@a AND is_default)", conn);
-        cmd.Parameters.AddWithValue("m", module);
-        cmd.Parameters.AddWithValue("a", action);
-        
-        return (bool)(await cmd.ExecuteScalarAsync())!;
-    }
-
-    public async Task InsertManifestAsync(ActionManifest m)
-    {
-        await using var conn = new NpgsqlConnection(ConnectionString);
-        await conn.OpenAsync();
-        
-        await using var cmd = new NpgsqlCommand(
-            "INSERT INTO api.action_catalog(module, action, version, http_method, target_schema, target_function, " +
-            "request_schema, response_schema, outcomes, required_policy, idempotency_mode, idempotency_scope, " +
-            "timeout_ms, enabled, is_default, contract_version) " +
-            "VALUES(@m,@a,@v,@http,@ts,@tf,@req::jsonb,@resp::jsonb,@outcomes::jsonb,@policy::jsonb,@idem_mode,@idem_scope,@timeout,@enabled,@is_default,@cv)", conn);
-        cmd.Parameters.AddWithValue("m", m.Module);
-        cmd.Parameters.AddWithValue("a", m.Action);
-        cmd.Parameters.AddWithValue("v", m.Version);
-        cmd.Parameters.AddWithValue("http", m.HttpMethod);
-        cmd.Parameters.AddWithValue("ts", m.TargetSchema);
-        cmd.Parameters.AddWithValue("tf", m.TargetFunction);
-        cmd.Parameters.AddWithValue("req", m.RequestSchema.GetRawText());
-        cmd.Parameters.AddWithValue("resp", m.ResponseSchema.GetRawText());
-        cmd.Parameters.AddWithValue("outcomes", JsonSerializer.Serialize(m.Outcomes));
-        cmd.Parameters.AddWithValue("policy", JsonSerializer.Serialize(m.RequiredPolicy));
-        cmd.Parameters.AddWithValue("idem_mode", m.IdempotencyMode);
-        cmd.Parameters.AddWithValue("idem_scope", m.IdempotencyScope);
-        cmd.Parameters.AddWithValue("timeout", m.TimeoutMs);
-        cmd.Parameters.AddWithValue("enabled", m.Enabled);
-        cmd.Parameters.AddWithValue("is_default", m.IsDefault);
-        cmd.Parameters.AddWithValue("cv", m.ContractVersion);
-        
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    public async Task ActivateAsync(string module, string action, int version)
-    {
-        await using var conn = new NpgsqlConnection(ConnectionString);
-        await conn.OpenAsync();
-        
-        await using var tx = await conn.BeginTransactionAsync();
-        
-        await using var clear = new NpgsqlCommand(
-            "UPDATE api.action_catalog SET is_default = false WHERE module=@m AND action=@a",
-            conn, tx);
-        clear.Parameters.AddWithValue("m", module);
-        clear.Parameters.AddWithValue("a", action);
-        
-        await clear.ExecuteNonQueryAsync();
-        
-        await using var set = new NpgsqlCommand(
-            "UPDATE api.action_catalog SET enabled = true, is_default = true WHERE module=@m AND action=@a AND version=@v",
-            conn, tx);
-        set.Parameters.AddWithValue("m", module);
-        set.Parameters.AddWithValue("a", action);
-        set.Parameters.AddWithValue("v", version);
-        
-        await set.ExecuteNonQueryAsync();
-        await tx.CommitAsync();
-    }
-
-    public async Task DisableAsync(string module, string action, int version, int? replacement)
-    {
-        await using var conn = new NpgsqlConnection(ConnectionString);
-        await conn.OpenAsync();
-        
-        await using var tx = await conn.BeginTransactionAsync();
-        
-        if (replacement.HasValue)
-        {
-            await using var clear = new NpgsqlCommand(
-                "UPDATE api.action_catalog SET is_default = false WHERE module=@m AND action=@a",
-                conn, tx);
-            clear.Parameters.AddWithValue("m", module);
-            clear.Parameters.AddWithValue("a", action);
-            
-            await clear.ExecuteNonQueryAsync();
-            
-            await using var set = new NpgsqlCommand(
-                "UPDATE api.action_catalog SET enabled = true, is_default = true WHERE module=@m AND action=@a AND version=@r",
-                conn, tx);
-            set.Parameters.AddWithValue("m", module);
-            set.Parameters.AddWithValue("a", action);
-            set.Parameters.AddWithValue("r", replacement.Value);
-            
-            await set.ExecuteNonQueryAsync();
-        }
-        
-        await using var off = new NpgsqlCommand(
-            "UPDATE api.action_catalog SET enabled = false WHERE module=@m AND action=@a AND version=@v",
-            conn, tx);
-        off.Parameters.AddWithValue("m", module);
-        off.Parameters.AddWithValue("a", action);
-        off.Parameters.AddWithValue("v", version);
-        
-        await off.ExecuteNonQueryAsync();
-        await tx.CommitAsync();
     }
 
     public async Task<List<(string Module, string Action, int Version)>> ListAllAsync()

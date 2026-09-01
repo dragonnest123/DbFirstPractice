@@ -89,7 +89,9 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION payment.request_v1(jsonb,jsonb) OWNER TO course_owner;
-ALTER FUNCTION payment.get_v1(jsonb,jsonb) OWNER TO course_owner;
+ALTER FUNCTION payment.request_v1(jsonb,jsonb) OWNER TO course_target;
+ALTER FUNCTION payment.get_v1(jsonb,jsonb) OWNER TO course_target;
+GRANT EXECUTE ON FUNCTION payment.request_v1(jsonb,jsonb) TO course_owner;
+GRANT EXECUTE ON FUNCTION payment.get_v1(jsonb,jsonb) TO course_owner;
 REVOKE ALL ON FUNCTION payment.request_v1(jsonb,jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION payment.get_v1(jsonb,jsonb) FROM PUBLIC;

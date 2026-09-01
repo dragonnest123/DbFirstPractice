@@ -42,6 +42,7 @@ services:
       dockerfile: Cli/Dockerfile
     environment:
       POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_migration;Password=migration;Include Error Detail=false
+      PUBLICATION_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_publication;Password=publication;Include Error Detail=false
     depends_on:
       - postgres
 

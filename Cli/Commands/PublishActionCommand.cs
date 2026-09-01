@@ -1,3 +1,4 @@
+using Cli.Services;
 using Cli.Utils;
 using Shared.Models;
 
@@ -23,19 +24,12 @@ public sealed class PublishActionCommand : ICommand
 
         try
         {
-            var existing = await ctx.Store.FindManifestAsync(manifest!.Module, manifest.Action, manifest.Version);
-            if (existing is not null)
-            {
-                if (existing.SameAs(manifest))
-                    return ctx.Envelope.Ok(new { resource = "action", operation = "published", key = manifest.Key, version = manifest.Version });
-                return ctx.Envelope.Error("manifest.conflict", "published action version is immutable");
-            }
-
-            if (manifest.IsDefault && await ctx.Store.HasDefaultAsync(manifest.Module, manifest.Action))
-                return ctx.Envelope.Error("manifest.conflict", "route already has a default version");
-
-            await ctx.Store.InsertManifestAsync(manifest);
-            return ctx.Envelope.Ok(new { resource = "action", operation = "published", key = manifest.Key, version = manifest.Version });
+            await ctx.Publication.PublishAsync(await File.ReadAllTextAsync(path));
+            return ctx.Envelope.Ok(new { resource = "action", operation = "published", key = manifest!.Key, version = manifest.Version });
+        }
+        catch (PublicationException ex)
+        {
+            return ctx.Envelope.Error(ex.Code, ex.Message);
         }
         catch (Exception ex)
         {

@@ -24,8 +24,27 @@ public static class ApiForwarder
         }
         catch (HttpRequestException)
         {
-            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            await WriteErrorAsync(context, "dependency.unavailable", "db unavailable", true, StatusCodes.Status503ServiceUnavailable);
         }
+        catch (OperationCanceledException)
+        {
+            await WriteErrorAsync(context, "action.timeout", "timeout", true, StatusCodes.Status504GatewayTimeout);
+        }
+    }
+
+    private static async Task WriteErrorAsync(
+        HttpContext context, string code, string message, bool retryable, int status)
+    {
+        context.Response.StatusCode = status;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            status = "error",
+            code,
+            message,
+            retryable,
+            details = new { },
+            meta = new { correlationId = Guid.NewGuid().ToString(), actionVersion = (int?)null }
+        });
     }
 
     private static HttpRequestMessage BuildRequest(HttpContext context, string targetPathAndQuery)

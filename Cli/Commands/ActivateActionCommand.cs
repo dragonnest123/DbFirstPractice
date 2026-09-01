@@ -1,3 +1,4 @@
+using Cli.Services;
 using Cli.Utils;
 using Shared.Utils;
 
@@ -21,13 +22,13 @@ public sealed class ActivateActionCommand : ICommand
 
         try
         {
-            var existing = await ctx.Store.FindManifestAsync(module, action, version);
-            if (existing is null)
-                return ctx.Envelope.Error("action.not_found", $"version {version} of {module}.{action} is not published");
-            
-            await ctx.Store.ActivateAsync(module, action, version);
-            
+            await ctx.Publication.ActivateAsync(module, action, version);
+
             return ctx.Envelope.Ok(new { resource = "action", operation = "activated", key = $"{module}.{action}", version });
+        }
+        catch (PublicationException ex)
+        {
+            return ctx.Envelope.Error(ex.Code, ex.Message);
         }
         catch (Exception ex)
         {

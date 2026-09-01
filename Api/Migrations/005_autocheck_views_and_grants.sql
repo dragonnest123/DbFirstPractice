@@ -29,7 +29,17 @@ REVOKE ALL ON payment.operations, payment.operation_events FROM course_runtime;
 REVOKE ALL ON payment.operations, payment.operation_events FROM PUBLIC;
 
 GRANT USAGE ON SCHEMA public, api, payment, autocheck TO course_migration;
-GRANT ALL ON public.schema_migrations, api.action_catalog, api.action_dispatches, api.idempotency_store, payment.operations, payment.operation_events TO course_migration;
+GRANT ALL ON public.schema_migrations TO course_migration;
+GRANT SELECT, INSERT ON api.action_catalog TO course_migration;
+GRANT CREATE ON SCHEMA api, payment, autocheck, public TO course_migration;
+GRANT course_target TO course_migration;
+
+GRANT USAGE ON SCHEMA api TO course_publication;
+GRANT SELECT ON api.action_catalog TO course_publication;
+
+GRANT USAGE, CREATE ON SCHEMA api, payment TO course_target;
+GRANT SELECT, INSERT ON payment.operations TO course_target;
+GRANT INSERT ON payment.operation_events TO course_target;
 
 ALTER VIEW autocheck.contract_info OWNER TO course_owner;
 ALTER VIEW autocheck.action_definitions OWNER TO course_owner;

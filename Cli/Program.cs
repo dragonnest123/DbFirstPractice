@@ -9,12 +9,14 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        var publicationConn = Environment.GetEnvironmentVariable("PUBLICATION_CONNECTION")
+            ?? "Host=postgres;Port=5432;Database=course;Username=course_publication;Password=publication;Include Error Detail=false";
+
         var ctx = new CommandContext
         {
             Envelope = new Envelope(),
-            Store = new ActionCatalogService(
-                Environment.GetEnvironmentVariable("POSTGRES_CONNECTION")
-                ?? "Host=postgres;Port=5432;Database=course;Username=course_migration;Password=migration;Include Error Detail=false"),
+            Store = new ActionCatalogService(publicationConn),
+            Publication = new PublicationService(publicationConn),
             Migrations = new MigrationService()
         };
 

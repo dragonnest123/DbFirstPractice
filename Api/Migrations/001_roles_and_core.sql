@@ -15,6 +15,12 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'course_migration') THEN
         CREATE ROLE course_migration LOGIN PASSWORD 'migration';
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'course_publication') THEN
+        CREATE ROLE course_publication LOGIN PASSWORD 'publication';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'course_target') THEN
+        CREATE ROLE course_target NOLOGIN NOSUPERUSER;
+    END IF;
 END $$;
 
 GRANT CREATE ON DATABASE course TO course_migration;
@@ -44,7 +50,6 @@ CREATE TABLE IF NOT EXISTS api.action_catalog (
     contract_version text NOT NULL CHECK (contract_version = 'course-1'),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (module, action, version),
-    CONSTRAINT chk_manifest_immutable CHECK (true),
     CONSTRAINT chk_default_implies_enabled CHECK (NOT is_default OR enabled)
 );
 

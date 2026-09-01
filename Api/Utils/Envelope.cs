@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Api.Contracts;
 
 namespace Api.Utils;
 
@@ -10,7 +11,7 @@ public static class Envelope
         bool retryable, 
         string correlationId, 
         int? actionVersion, 
-        int http) 
+        int http)
         => Results.Json(new
         {
             status = "error",
@@ -51,5 +52,17 @@ public static class Envelope
             : 0;
 
         return Ok(outcome ?? "ok", result, correlationId, actionVersion);
+    }
+
+    public static IResult DomainError(JsonElement envelope, string correlationId, int? actionVersion)
+    {
+        var code = envelope.TryGetProperty("code", out var cd) ? cd.GetString() : null;
+        code = string.IsNullOrEmpty(code) ? "internal.error" : code;
+
+        var message = envelope.TryGetProperty("message", out var m) && m.GetString() is { Length: > 0 } msg
+            ? msg
+            : "error";
+
+        return Error(code, message, false, correlationId, actionVersion, ErrorMapping.ToHttpCode(code));
     }
 }

@@ -1,3 +1,4 @@
+using Cli.Services;
 using Cli.Utils;
 using Shared.Utils;
 
@@ -52,12 +53,16 @@ public sealed class DisableActionCommand : ICommand
                     return ctx.Envelope.Error("action.invalid", "replacement version not found or disabled");
             }
 
-            await ctx.Store.DisableAsync(module, action, version, replacement);
+            await ctx.Publication.DisableAsync(module, action, version, replacement);
             
             return ctx.Envelope.Ok(new
             {
                 resource = "action", operation = "disabled", key = $"{module}.{action}", version, replacementVersion = replacement
             });
+        }
+        catch (PublicationException ex)
+        {
+            return ctx.Envelope.Error(ex.Code, ex.Message);
         }
         catch (Exception ex)
         {

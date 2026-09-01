@@ -18,10 +18,6 @@ public static class ActionEndpoint
         ActionInvoker invoker)
     {
         var correlationId = Guid.NewGuid().ToString();
-        var payload = await HttpUtil.ReadBodyAsync(http.Request);
-
-        if (!ValidationUtil.IsValidJson(payload))
-            return Envelope.Error("request.invalid", "invalid json", false, correlationId, null, 400);
 
         if (!IdentifierUtil.IsValidSqlIdentifier(module) || !IdentifierUtil.IsValidSqlIdentifier(action))
             return Envelope.Error("request.invalid", "invalid route", false, correlationId, null, 400);
@@ -32,6 +28,11 @@ public static class ActionEndpoint
         if (!jwt.TryValidate(http.Request.Headers.Authorization.ToString(), out var claims)
             || !JwtService.TryGetAuthContext(claims, out var auth))
             return Envelope.Error("auth.invalid", "invalid token", false, correlationId, explicitVersion, 401);
+
+        var payload = await HttpUtil.ReadBodyAsync(http.Request);
+
+        if (!ValidationUtil.IsValidJson(payload))
+            return Envelope.Error("request.invalid", "invalid json", false, correlationId, null, 400);
 
         ActionManifest? entry;
         try
@@ -75,6 +76,6 @@ public static class ActionEndpoint
             idempotencyKey,
             scopeKey);
 
-        return await invoker.InvokeAsync(state, entry);
+        return await invoker.InvokeAsync(state, entry, http.RequestAborted);
     }
 }

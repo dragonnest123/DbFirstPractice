@@ -8,6 +8,8 @@ namespace Api.Services;
 
 public sealed class ActionInvoker
 {
+    private static readonly TimeSpan RollbackTimeout = TimeSpan.FromSeconds(5);
+
     private readonly IdempotencyService _idempotency;
     private readonly DispatchService _dispatch;
 
@@ -17,31 +19,33 @@ public sealed class ActionInvoker
         _dispatch = dispatch;
     }
 
-    public async Task<IResult> InvokeAsync(RequestState s, ActionManifest entry)
+    public async Task<IResult> InvokeAsync(RequestState s, ActionManifest entry, CancellationToken requestAborted)
     {
+        await using var conn = new NpgsqlConnection(s.ConnectionString);
+        NpgsqlTransaction? tx = null;
+        using var timeoutCts = new CancellationTokenSource(s.TimeoutMs);
+        using var invocationCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, requestAborted);
+        using var rollbackCts = new CancellationTokenSource(RollbackTimeout);
+
         try
         {
-            await using var conn = new NpgsqlConnection(s.ConnectionString);
             await conn.OpenAsync();
 
-            await using var tx = await conn.BeginTransactionAsync();
-            var cts = new CancellationTokenSource(s.TimeoutMs);
+            tx = await conn.BeginTransactionAsync();
 
             if (s.IdempotencyScopeKey is not null)
             {
-                var guard = await _idempotency.ClaimOrReplayAsync(conn, tx, s, cts.Token);
+                var guard = await _idempotency.ClaimOrReplayAsync(conn, tx, s, invocationCts.Token);
                 if (guard is not null)
                     return guard;
             }
 
-            var (invokeJson, invokeError) = await ExecuteInvokeAsync(conn, tx, s, cts.Token);
-            if (invokeError is not null)
-                return invokeError;
+            var invokeJson = await ExecuteInvokeAsync(conn, tx, s, invocationCts.Token);
 
             JsonDocument envelope;
             try
             {
-                envelope = JsonDocument.Parse(invokeJson!);
+                envelope = JsonDocument.Parse(invokeJson);
             }
             catch
             {
@@ -63,110 +67,97 @@ public sealed class ActionInvoker
                 return await HandleContractViolationAsync(tx, s, "result schema violation", outcome);
 
             await _dispatch.LogAsync(
-                s.CorrelationId, 
-                s.RequestId, 
-                s.Module, 
-                s.Action, 
-                s.Version, 
-                s.Principal, 
-                s.PayloadHash, 
-                "OK", 
-                outcome, 
-                conn, 
-                tx, 
-                cts.Token);
+                s.CorrelationId,
+                s.RequestId,
+                s.Module,
+                s.Action,
+                s.Version,
+                s.Principal,
+                s.PayloadHash,
+                "OK",
+                outcome,
+                conn,
+                tx,
+                invocationCts.Token);
 
             if (s.IdempotencyScopeKey is not null)
-                await _idempotency.StoreResponseAsync(conn, tx, s.IdempotencyScopeKey, s.RequestId, invokeJson!, cts.Token);
+                await _idempotency.StoreResponseAsync(conn, tx, s.IdempotencyScopeKey, s.RequestId, invokeJson, invocationCts.Token);
 
-            await tx.CommitAsync(cts.Token);
+            await tx.CommitAsync(invocationCts.Token);
             return Envelope.Ok(outcome!, result, s.CorrelationId, s.Version);
+        }
+        catch (OperationCanceledException)
+        {
+            if (tx is not null)
+                await RollbackBestEffortAsync(tx, rollbackCts.Token);
+            return Envelope.Error("action.timeout", "timeout", true, s.CorrelationId, s.Version, 504);
         }
         catch (NpgsqlException)
         {
+            if (tx is not null)
+                await RollbackBestEffortAsync(tx, rollbackCts.Token);
             return Envelope.Error("dependency.unavailable", "db unavailable", true, s.CorrelationId, s.Version, 503);
         }
     }
 
-    private async Task<(string? Json, IResult? Error)> ExecuteInvokeAsync(
+    private static async Task<string> ExecuteInvokeAsync(
         NpgsqlConnection conn, NpgsqlTransaction tx, RequestState s, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            "SELECT api.invoke(@m,@a,@v,@ctx::jsonb,@pay::jsonb)::text",
+            conn, tx);
+        cmd.CommandTimeout = Math.Max(1, s.TimeoutMs / 1000 + 2);
+        cmd.Parameters.AddWithValue("m", s.Module);
+        cmd.Parameters.AddWithValue("a", s.Action);
+        cmd.Parameters.AddWithValue("v", s.ExplicitVersion.HasValue ? s.ExplicitVersion.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("ctx", s.ContextJson);
+        cmd.Parameters.AddWithValue("pay", s.Payload);
+
+        return (await cmd.ExecuteScalarAsync(ct))?.ToString() ?? "";
+    }
+
+    private static async Task RollbackBestEffortAsync(NpgsqlTransaction tx, CancellationToken ct)
     {
         try
         {
-            await using var cmd = new NpgsqlCommand(
-                "SELECT api.invoke(@m,@a,@v,@ctx::jsonb,@pay::jsonb)::text",
-                conn, tx);
-            cmd.CommandTimeout = Math.Max(1, s.TimeoutMs / 1000 + 2);
-            cmd.Parameters.AddWithValue("m", s.Module);
-            cmd.Parameters.AddWithValue("a", s.Action);
-            cmd.Parameters.AddWithValue("v", s.ExplicitVersion.HasValue ? s.ExplicitVersion.Value : DBNull.Value);
-            cmd.Parameters.AddWithValue("ctx", s.ContextJson);
-            cmd.Parameters.AddWithValue("pay", s.Payload);
-
-            var json = (await cmd.ExecuteScalarAsync(ct))?.ToString() ?? "";
-            return (json, null);
-        }
-        catch (OperationCanceledException)
-        {
             await tx.RollbackAsync(ct);
-            return (null, Envelope.Error("action.timeout", "timeout", true, s.CorrelationId, s.Version, 504));
         }
-        catch (NpgsqlException)
+        catch
         {
-            await tx.RollbackAsync(ct);
-            return (null, Envelope.Error("dependency.unavailable", "db unavailable", true, s.CorrelationId, s.Version, 503));
         }
     }
 
     private async Task<IResult> HandleDomainErrorAsync(NpgsqlTransaction tx, RequestState s, JsonElement root)
     {
-        var code = root.TryGetProperty("code", out var cd) ? cd.GetString() : null;
-        code = string.IsNullOrEmpty(code) ? "internal.error" : code;
-        
-        var message = root.TryGetProperty("message", out var m) && m.GetString() is { Length: > 0 } msg 
-            ? msg 
-            : "error";
-        
-        var httpCode = code switch
-        {
-            "access.denied" => 403,
-            "action.not_found" => 404,
-            "operation.not_found" => 404,
-            "idempotency.conflict" => 409,
-            "idempotency.required" => 400,
-            "payload.invalid" => 422,
-            _ => 500
-        };
-        
         await tx.RollbackAsync();
         await _dispatch.LogAsync(
-            s.CorrelationId, 
-            s.RequestId, 
-            s.Module, 
-            s.Action, 
-            s.Version, 
-            s.Principal, 
-            s.PayloadHash, 
-            "ERROR", 
+            s.CorrelationId,
+            s.RequestId,
+            s.Module,
+            s.Action,
+            s.Version,
+            s.Principal,
+            s.PayloadHash,
+            "ERROR",
             null);
-        
-        return Envelope.Error(code, message, false, s.CorrelationId, s.Version, httpCode);
+
+        return Envelope.DomainError(root, s.CorrelationId, s.Version);
     }
 
     private async Task<IResult> HandleContractViolationAsync(NpgsqlTransaction tx, RequestState s, string message, string? outcome)
     {
         await tx.RollbackAsync();
         await _dispatch.LogAsync(
-            s.CorrelationId, 
-            s.RequestId, 
-            s.Module, 
-            s.Action, 
-            s.Version, 
-            s.Principal, 
-            s.PayloadHash, 
-            "ERROR", 
+            s.CorrelationId,
+            s.RequestId,
+            s.Module,
+            s.Action,
+            s.Version,
+            s.Principal,
+            s.PayloadHash,
+            "ERROR",
             outcome);
-        
+
         return Envelope.Error("action.contract_violation", message, false, s.CorrelationId, s.Version, 500);
     }
 }

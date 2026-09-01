@@ -1,6 +1,7 @@
 using Gateway;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 64 * 1024);
 
 builder.Services.AddHttpClient("api", client =>
 {

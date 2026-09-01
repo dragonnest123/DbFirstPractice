@@ -45,7 +45,6 @@ public sealed class ApplyMigrationCommand : ICommand
                 }
                 
                 await ctx.Migrations.ApplyMigrationAsync(filename, checksum, sql);
-                await ctx.Migrations.GrantUsageToOwnerAsync();
                 applied.Add(filename);
             }
             catch (Exception ex)

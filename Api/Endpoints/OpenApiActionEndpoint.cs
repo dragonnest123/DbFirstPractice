@@ -15,7 +15,7 @@ public static class OpenApiActionEndpoint
 
             await using var cmd =
                 new NpgsqlCommand(
-                    "SELECT request_schema, response_schema FROM api.action_catalog WHERE module=@m AND action=@a AND version=@v",
+                    "SELECT request_schema, response_schema, idempotency_mode FROM api.action_catalog WHERE module=@m AND action=@a AND version=@v",
                     conn);
             cmd.Parameters.AddWithValue("m", module);
             cmd.Parameters.AddWithValue("a", action);
@@ -27,12 +27,15 @@ public static class OpenApiActionEndpoint
 
             var req = JsonNode.Parse(r.GetString(0));
             var resp = JsonNode.Parse(r.GetString(1));
+            var idempotencyRequired = r.GetString(2) == "required";
             var path = $"/api/{module}/{action}";
+
             var doc = new JsonObject
             {
-                ["openapi"] = "3.0.0",
+                ["openapi"] = "3.1.0",
                 ["info"] = new JsonObject
                     { ["title"] = $"{module}.{action} v{version}", ["version"] = version.ToString() },
+                ["jsonSchemaDialect"] = "https://json-schema.org/draft/2020-12/schema",
                 ["paths"] = new JsonObject
                 {
                     [path] = new JsonObject
@@ -42,20 +45,53 @@ public static class OpenApiActionEndpoint
                             ["requestBody"] = new JsonObject
                             {
                                 ["content"] = new JsonObject
-                                    { ["application/json"] = new JsonObject { ["schema"] = req } }
+                                {
+                                    ["application/json"] = new JsonObject { ["schema"] = req }
+                                }
+                            },
+                            ["parameters"] = new JsonArray
+                            {
+                                new JsonObject
+                                {
+                                    ["name"] = "X-Action-Version",
+                                    ["in"] = "header",
+                                    ["required"] = false,
+                                    ["description"] = "explicit action version; default version is used when absent",
+                                    ["schema"] = new JsonObject { ["type"] = "integer", ["minimum"] = 1 }
+                                },
+                                new JsonObject
+                                {
+                                    ["name"] = "Idempotency-Key",
+                                    ["in"] = "header",
+                                    ["required"] = idempotencyRequired,
+                                    ["description"] = "idempotency key; required when manifest idempotency_mode is required",
+                                    ["schema"] = new JsonObject { ["type"] = "string", ["maxLength"] = 128 }
+                                }
                             },
                             ["responses"] = new JsonObject
                             {
                                 ["200"] = new JsonObject
                                 {
+                                    ["description"] = "success",
                                     ["content"] = new JsonObject
-                                        { ["application/json"] = new JsonObject { ["schema"] = resp } }
+                                    {
+                                        ["application/json"] = new JsonObject { ["schema"] = resp }
+                                    }
                                 }
                             }
                         }
                     }
-                }
+                },
+                ["components"] = new JsonObject
+                {
+                    ["securitySchemes"] = new JsonObject
+                    {
+                        ["bearerAuth"] = new JsonObject { ["type"] = "http", ["scheme"] = "bearer" }
+                    }
+                },
+                ["security"] = new JsonArray { new JsonObject { ["bearerAuth"] = new JsonArray() } }
             };
+
             return Results.Text(
                 doc.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = false }),
                 "application/json");
