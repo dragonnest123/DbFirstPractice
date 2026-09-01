@@ -93,11 +93,15 @@ public class PrivilegeIntegrationTests
         Assert.Null(seed);
     }
 
-    [Fact]
-    public async Task RuntimeRole_CanReadEvidenceViews()
+    [Theory]
+    [InlineData("contract_info")]
+    [InlineData("action_definitions")]
+    [InlineData("action_dispatches")]
+    [InlineData("operations")]
+    [InlineData("operation_events")]
+    public async Task RuntimeRole_CanReadEvidenceViews(string view)
     {
-        var views = await Db.TryExecAsync(_db.RuntimeConnection,
-            "SELECT * FROM autocheck.contract_info, autocheck.action_definitions, autocheck.action_dispatches, autocheck.operations, autocheck.operation_events");
-        Assert.Null(views);
+        var result = await Db.TryExecAsync(_db.RuntimeConnection, $"SELECT * FROM autocheck.{view}");
+        Assert.Null(result);
     }
 }

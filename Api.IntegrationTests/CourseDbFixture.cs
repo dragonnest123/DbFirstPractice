@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+using Cli.Services;
 using Testcontainers;
 using Testcontainers.PostgreSql;
 using Xunit;
@@ -42,6 +45,31 @@ public sealed class CourseDbFixture : IAsyncLifetime
         PublicationConnection = $"{baseConnection};Username=course_publication;Password=publication";
         MigrationConnection = $"{baseConnection};Username=course_migration;Password=migration";
         SuperuserConnection = $"{baseConnection};Username=postgres;Password=postgres";
+
+        var fixtures = Path.Combine(TestPaths.RepoRoot, "task", "week1", "autocheck", "fixtures");
+        await ApplyFileAsync(Path.Combine(fixtures, "migrations", "900_opencheck_probe.sql"));
+        await ApplySqlAsync("""
+            CREATE SCHEMA IF NOT EXISTS pubtest_ok;
+            CREATE OR REPLACE FUNCTION pubtest_ok.probe(p_context jsonb, p_payload jsonb)
+            RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
+            AS $$ BEGIN RETURN jsonb_build_object('status','ok','outcome','OK'); END $$;
+            """);
+
+        var manifest = Path.Combine(fixtures, "manifests", "opencheck-probe-v1.action.json");
+        await new PublicationService(PublicationConnection).PublishAsync(
+            await File.ReadAllTextAsync(manifest));
+    }
+
+    private async Task ApplyFileAsync(string file)
+    {
+        await ApplySqlAsync(await File.ReadAllTextAsync(file));
+    }
+
+    private async Task ApplySqlAsync(string sql)
+    {
+        var checksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql))).ToLowerInvariant();
+        await new MigrationService(MigrationConnection).ApplyMigrationAsync(
+            $"{Guid.NewGuid():N}.sql", checksum, sql);
     }
 
     public Task DisposeAsync() => _postgres.StopAsync();

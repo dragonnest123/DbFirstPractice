@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Cli.Services;
 using Xunit;
@@ -17,20 +15,6 @@ public class PublicationIntegrationTests
     public PublicationIntegrationTests(CourseDbFixture db)
     {
         _db = db;
-        EnsureTargetFunction();
-    }
-
-    private void EnsureTargetFunction()
-    {
-        var sql = $"""
-            CREATE SCHEMA IF NOT EXISTS {TargetSchema};
-            CREATE OR REPLACE FUNCTION {TargetSchema}.{TargetFunction}(p_context jsonb, p_payload jsonb)
-            RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
-            AS $$ BEGIN RETURN jsonb_build_object('status','ok','outcome','OK'); END $$;
-            """;
-        var checksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql))).ToLowerInvariant();
-        new MigrationService(_db.MigrationConnection).ApplyMigrationAsync(
-            $"pubtest_{Guid.NewGuid():N}.sql", checksum, sql).GetAwaiter().GetResult();
     }
 
     private PublicationService Publication() => new(_db.PublicationConnection);
@@ -80,40 +64,22 @@ public class PublicationIntegrationTests
         Assert.Equal("manifest.conflict", ex.Code);
     }
 
-    [Fact]
-    public async Task Publish_TargetNotOwnedByCourseTarget_Rejected()
+    [Theory]
+    [InlineData("pubtest_notowned", "postgres")]
+    [InlineData("pubtest_otherowner", "course_migration")]
+    public async Task Publish_TargetNotOwnedByCourseTarget_Rejected(string schema, string ownerRole)
     {
-        var create = """
-            CREATE SCHEMA IF NOT EXISTS pubtest_notowned;
-            CREATE OR REPLACE FUNCTION pubtest_notowned.probe(p_context jsonb, p_payload jsonb)
+        var create = $"""
+            CREATE SCHEMA IF NOT EXISTS {schema};
+            CREATE OR REPLACE FUNCTION {schema}.probe(p_context jsonb, p_payload jsonb)
             RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
             AS $$ BEGIN RETURN jsonb_build_object('status','ok'); END $$;
+            ALTER FUNCTION {schema}.probe(jsonb,jsonb) OWNER TO {ownerRole};
             """;
         Assert.Null(await Db.TryExecAsync(_db.SuperuserConnection, create));
 
         var manifest = BuildManifest(module: "pubtest", action: "badowner", version: 1, isDefault: true, timeoutMs: 2000,
-            targetSchema: "pubtest_notowned", targetFunction: "probe");
-
-        var ex = await Assert.ThrowsAsync<PublicationException>(() => Publication().PublishAsync(manifest));
-
-        Assert.Equal("manifest.invalid", ex.Code);
-        Assert.Contains("course_target", ex.Message);
-    }
-
-    [Fact]
-    public async Task Publish_TargetOwnedByOtherRole_Rejected()
-    {
-        var create = """
-            CREATE SCHEMA IF NOT EXISTS pubtest_otherowner;
-            CREATE OR REPLACE FUNCTION pubtest_otherowner.probe(p_context jsonb, p_payload jsonb)
-            RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
-            AS $$ BEGIN RETURN jsonb_build_object('status','ok'); END $$;
-            ALTER FUNCTION pubtest_otherowner.probe(jsonb,jsonb) OWNER TO postgres;
-            """;
-        Assert.Null(await Db.TryExecAsync(_db.SuperuserConnection, create));
-
-        var manifest = BuildManifest(module: "pubtest", action: "otherowner", version: 1, isDefault: true, timeoutMs: 2000,
-            targetSchema: "pubtest_otherowner", targetFunction: "probe");
+            targetSchema: schema, targetFunction: "probe");
 
         var ex = await Assert.ThrowsAsync<PublicationException>(() => Publication().PublishAsync(manifest));
 

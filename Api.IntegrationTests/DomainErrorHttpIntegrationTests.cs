@@ -3,7 +3,6 @@ using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
-using Cli.Services;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.IdentityModel.Tokens;
 using Xunit;
@@ -22,21 +21,10 @@ public class DomainErrorHttpIntegrationTests
     {
         _db = db;
 
-        var migrationFile = Path.Combine(TestPaths.RepoRoot, "task", "week1", "autocheck", "fixtures", "migrations", "900_opencheck_probe.sql");
-        var migrationSql = File.ReadAllText(migrationFile);
-        new MigrationService(_db.MigrationConnection).ApplyMigrationAsync(
-            $"opencheck_{Guid.NewGuid():N}.sql",
-            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(migrationSql))).ToLowerInvariant(),
-            migrationSql).GetAwaiter().GetResult();
-
-        var manifestFile = Path.Combine(TestPaths.RepoRoot, "task", "week1", "autocheck", "fixtures", "manifests", "opencheck-probe-v1.action.json");
-        new PublicationService(_db.PublicationConnection).PublishAsync(
-            File.ReadAllText(manifestFile)).GetAwaiter().GetResult();
-
         Environment.SetEnvironmentVariable("COURSE_JWT_ISSUER", "moduledev-course");
         Environment.SetEnvironmentVariable("COURSE_JWT_AUDIENCE", "moduledev-api");
         Environment.SetEnvironmentVariable("COURSE_JWT_SIGNING_KEY", SigningKey);
-        Environment.SetEnvironmentVariable("POSTGRES_CONNECTION", _db.RuntimeConnection);
+        Environment.SetEnvironmentVariable("POSTGRES_CONNECTION", db.RuntimeConnection);
 
         _factory = new WebApplicationFactory<Program>();
     }
