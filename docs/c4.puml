@@ -3,16 +3,20 @@
 
 Person(client, "Внешний клиент", "HTTP-клиент курса, отправляет POST /api/{module}/{action} с JWT")
 
-System_Boundary(course, "Course week-1") {
+System_Boundary(course, "Course week-2") {
     Container(gateway, "gateway", "C# ASP.NET Core", "Публикует 8080; whitelist-прокси /api/*, /health/*, /openapi/*; форвардит контрактные заголовки")
     Container(api, "api", "C# ASP.NET Core", "Generic action runtime: JWT -> context, schema validation, одна Npgsql транзакция -> api.invoke")
-    Container(cli, "cli", "C# console", "migration apply, action validate/publish/list/activate/disable")
-    ContainerDb(postgres, "postgres", "PostgreSQL 16", "action_catalog, idempotency_store, operations, operation_events, autocheck views")
+    Container(cli, "cli", "C# console", "migration apply, action publish/activate/disable, flow validate/publish/activate/start/get/signal/test-finish")
+    Container(workerA, "worker-a", "C# Workflow.Worker", "claim_jobs -> api.invoke -> finish_job; lease owner worker-a")
+    Container(workerB, "worker-b", "C# Workflow.Worker", "тот же image; lease owner worker-b")
+    ContainerDb(postgres, "postgres", "PostgreSQL 16", "action_catalog, workflow definitions/instances/jobs/attempts/signals/events, autocheck views")
 }
 
 Rel(client, gateway, "POST /api/{module}/{action}", "HTTPS/HTTP :8080")
 Rel(gateway, api, "forward по Compose DNS", "http://api:8080")
 Rel(api, postgres, "api.invoke, SELECT catalog", "Npgsql")
-Rel(cli, postgres, "migration apply, publish", "Npgsql")
+Rel(cli, postgres, "migration apply, publish/activate/start/signal", "Npgsql")
+Rel(workerA, postgres, "claim_jobs / api.invoke / finish_job / fail_job", "Npgsql, роль workflow_worker")
+Rel(workerB, postgres, "claim_jobs / api.invoke / finish_job / fail_job", "Npgsql, роль workflow_worker")
 
 @enduml

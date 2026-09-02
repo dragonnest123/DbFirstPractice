@@ -30,6 +30,8 @@ public sealed class CourseDbFixture : IAsyncLifetime
 
     public string PublicationConnection { get; private set; } = null!;
 
+    public string WorkerConnection { get; private set; } = null!;
+
     public string MigrationConnection { get; private set; } = null!;
 
     public string SuperuserConnection { get; private set; } = null!;
@@ -43,6 +45,7 @@ public sealed class CourseDbFixture : IAsyncLifetime
         var baseConnection = $"Host={host};Port={port};Database=course;Include Error Detail=false";
         RuntimeConnection = $"{baseConnection};Username=course_runtime;Password=runtime";
         PublicationConnection = $"{baseConnection};Username=course_publication;Password=publication";
+        WorkerConnection = $"{baseConnection};Username=workflow_worker;Password=worker";
         MigrationConnection = $"{baseConnection};Username=course_migration;Password=migration";
         SuperuserConnection = $"{baseConnection};Username=postgres;Password=postgres";
 

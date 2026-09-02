@@ -12,34 +12,42 @@ public static class Program
         var publicationConn = Environment.GetEnvironmentVariable("PUBLICATION_CONNECTION")
             ?? "Host=postgres;Port=5432;Database=course;Username=course_publication;Password=publication;Include Error Detail=false";
 
-        var ctx = new CommandContext
-        {
-            Envelope = new Envelope(),
-            Store = new ActionCatalogService(publicationConn),
-            Publication = new PublicationService(publicationConn),
-            Migrations = new MigrationService()
-        };
+        var envelope = new Envelope();
+        var store = new ActionCatalogService(publicationConn);
+        var publication = new PublicationService(publicationConn);
+        var flows = new FlowService(publicationConn);
+        var migrations = new MigrationService();
 
-        var router = new CommandRouter("cli", "cli <action|migration> ...", [
-            new CommandRouter("action", "action <validate|publish|list|activate|disable> ...", [
-                new ValidateActionCommand(),
-                new PublishActionCommand(),
-                new ListActionCommand(),
-                new ActivateActionCommand(),
-                new DisableActionCommand()
+        var router = new CommandRouter("cli", "cli <action|flow|migration> ...", envelope, [
+            new CommandRouter("action", "action <validate|publish|list|activate|disable> ...", envelope, [
+                new ValidateActionCommand(envelope),
+                new PublishActionCommand(envelope, publication),
+                new ListActionCommand(envelope, store),
+                new ActivateActionCommand(envelope, publication),
+                new DisableActionCommand(envelope, store, publication)
             ]),
-            new CommandRouter("migration", "migration apply <directory>", [
-                new ApplyMigrationCommand()
+            new CommandRouter("flow", "flow <validate|publish|list|activate|start|get|signal|test-finish> ...", envelope, [
+                new FlowValidateCommand(envelope, store),
+                new FlowPublishCommand(envelope, store, flows),
+                new FlowListCommand(envelope, flows),
+                new FlowActivateCommand(envelope, flows),
+                new FlowStartCommand(envelope, flows),
+                new FlowGetCommand(envelope, flows),
+                new FlowSignalCommand(envelope, flows),
+                new FlowTestFinishCommand(envelope, flows)
+            ]),
+            new CommandRouter("migration", "migration apply <directory>", envelope, [
+                new ApplyMigrationCommand(envelope, migrations)
             ])
         ]);
 
         try
         {
-            return await router.RunAsync(args, ctx);
+            return await router.RunAsync(args);
         }
         catch (Exception ex)
         {
-            return ctx.Envelope.Error("internal.error", ex.Message);
+            return envelope.Error("internal.error", ex.Message);
         }
     }
 }

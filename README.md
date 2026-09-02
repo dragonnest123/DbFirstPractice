@@ -1,20 +1,23 @@
-# NewProject — Week 1. Database-first action runtime
+# NewProject — Week 2. Персистентное workflow-ядро
 
 ## Решение
 
 ### Архитектура
 
-Контур состоит из четырёх сервисов `compose.yaml`:
+Контур состоит из шести сервисов `compose.yaml`:
 
 ```text
 Client http://localhost:8080
   -> gateway (C# ASP.NET Core, whitelist-прокси, единственный опубликованный порт 8080)
   -> api      (C# action runtime, внутренний, без опубликованных портов)
-  -> postgres (PostgreSQL, база course, named volume pgdata)
-cli (C#) -> postgres (migration apply, action publish/activate/disable)
+  -> postgres (PostgreSQL 16, база course, named volume pgdata; миграции встроены в image)
+  -> worker-a / worker-b (общий C# image Workflow.Worker, lease owners worker-a/worker-b)
+cli (C#) -> postgres (migration apply, action/flow publish/activate, flow start/get/signal)
 ```
 
-Единственная точка предметного выполнения — PostgreSQL-функция `api.invoke(...)` (SECURITY DEFINER, владелец `course_owner` с NOLOGIN). C#-слой `api` выполняет JWT-аутентификацию, резолв action из immutable каталога `api.action_catalog`, валидацию request/response схем и управляет одной транзакцией вокруг `api.invoke`. Новые actions регистрируются манифестом через `cli` без пересборки `gateway`/`api`. Подробная схема контейнеров: [C4](docs/c4.puml). Решения по границам доверия: [ADR-001](docs/adr-001-trust-boundary.md), [ADR-002](docs/adr-002-technical-vs-domain-result.md).
+Единственная точка предметного выполнения — PostgreSQL-функция `api.invoke(...)` (SECURITY DEFINER, владелец `course_owner` NOLOGIN). C#-слой `api` выполняет JWT-аутентификацию, резолв action из immutable каталога `api.action_catalog`, валидацию request/response схем и управляет одной транзакцией вокруг `api.invoke`. Новые actions регистрируются манифестом через `cli` без пересборки `gateway`/`api`.
+
+Workflow-ядро недели 2 исполняет произвольные карты `course-1`: worker забирает jobs через `workflow.claim_jobs`, вызывает закреплённый action через `api.invoke` в trusted-контексте `workflow-worker` (principal, processId, jobId, executionId, attemptId, deadline) и завершает через `workflow.finish_job` в одной транзакции с эффектом. Публикация новых action и карт после сборки не требует изменения C#. Подробная схема контейнеров: [C4](docs/c4.puml). Решения по границам доверия: [ADR-001](docs/adr-001-trust-boundary.md), [ADR-002](docs/adr-002-technical-vs-domain-result.md), [ADR-003](docs/adr-003-lease-fencing.md).
 
 ### Запуск
 
@@ -28,26 +31,44 @@ docker compose up -d --build
 
 - `POST http://localhost:8080/api/payment/request` — создать операцию (JWT + Idempotency-Key);
 - `POST http://localhost:8080/api/operation/get` — прочитать операцию;
-- `GET http://localhost:8080/health/live` — liveness процесса;
-- `GET http://localhost:8080/health/ready` — готовность контура (PostgreSQL + инициализация);
-- `GET http://localhost:8080/openapi/default.json` — OpenAPI включённых default-маршрутов.
+- `POST http://localhost:8080/api/workflow/get` — полное состояние процесса (policy `workflow:read`);
+- `GET http://localhost:8080/health/live`, `/health/ready`, `/openapi/default.json`;
+- `./course.sh flow start workflow-smoke --business-key <key> --data <file>` — запустить smoke-процесс.
 
-### Конфигурация
+Проверка:
 
-Сервис `api` читает переменные окружения:
+```bash
+./check.sh
+```
 
-| Переменная | Значение |
+### Workflow-карты
+
+Карта `course-1` — JSON (или YAML) документ с `flow_name`, immutable `version`, `start_step`, шагами и переходами:
+
+| Тип шага | Поведение |
 |---|---|
-| `COURSE_JWT_ISSUER` | `moduledev-course` |
-| `COURSE_JWT_AUDIENCE` | `moduledev-api` |
-| `COURSE_JWT_SIGNING_KEY` | HS256-ключ, не менее 32 байт (задаётся через `${VAR:-default}`; проверка подменяет через Compose override) |
-| `POSTGRES_CONNECTION` | строка подключения роли `course_runtime` |
+| `automatic` | создаёт job и вызывает зарегистрированный action через `api.invoke` |
+| `wait_signal` | долговечно ждёт идемпотентный сигнал (`flow signal`) |
+| `manual` | долговечно ждёт решение (на неделе 2 — до `WAITING_MANUAL`) |
+| `end` | завершает процесс с объявленным outcome |
 
-Сервис `cli` использует две роли: `course_migration` (`POSTGRES_CONNECTION`) — только для `migration apply` (checksummed SQL, DDL, `public.schema_migrations`); `course_publication` (`PUBLICATION_CONNECTION`) — для `action publish/activate/disable/list`, у которой нет прямого DML: изменения каталога выполняются только атомарными функциями `api.publish_action`/`api.activate_action`/`api.disable_action` (SECURITY DEFINER, владелец `course_owner` NOLOGIN). Ни одна из ролей CLI не имеет записи в `payment.operations`, `payment.operation_events` и `api.action_dispatches`. Реальные секреты в репозиторий не помещаются.
+Переходы — по конечному `outcome` (exclusive routing). Публикация создаёт immutable `flow_version`; `flow activate` выбирает активную версию для новых процессов, уже запущенные остаются pinned. Встроенные карты: `workflow-smoke` v1 (`automatic → wait_signal → end`, action `training.canary` v1) и v2 (action v2, другой сигнал и outcome — доказуемо другой `flow_version`), `manual-wait` (до `WAITING_MANUAL`). Пример: [workflow-map.example.json](task/week2/08_program_and_contracts/contracts/course-1/workflow-map.example.json), схема: [workflow-map.schema.json](task/week2/08_program_and_contracts/contracts/course-1/workflow-map.schema.json).
 
-### Миграции
+CLI: `flow validate/publish/list/activate/start/get/signal`; `flow test-finish` доступен только при `COURSE_TEST_PROFILE=1` и вызывает production finish-границу. Validator проверяет JSON Schema, граф (один start, достижимость, ацикличность, покрытие outcomes), соответствие action и policy, JSON Pointer mapping (RFC 6901) и bounded retry.
 
-`Api/Migrations/001..008` применяются автоматически при первом старте `postgres` через `/docker-entrypoint-initdb.d` (владелец — суперпользователь, объекты передаются `course_owner`). Внешние миграции применяются `cli migration apply <dir>`: лексикографический порядок, одна транзакция на файл, sha256-checksum в `public.schema_migrations`, изменение применённого файла отклоняется (`manifest.conflict`). В той же транзакции выполняется финализация: все publishable target-функции `(jsonb,jsonb)→jsonb` получают владельца `course_target` (NOLOGIN NOSUPERUSER), а их схемам/таблицам выдаются минимальные grants. `api.publish_action` проверяет перед публикацией, что target существует с точной сигнатурой и принадлежит `course_target`. Роль `course_migration` сужена до DDL и `public.schema_migrations`; публикация actions идёт только через атомарные catalog-функции (`006_publication_api.sql`), неизменяемость опубликованной версии защищена PostgreSQL trigger-ами (`007_manifest_immutability.sql`). Предметная история защищена на уровне DB (`008_operation_immutability.sql`): `payment.operation_events` — append-only (UPDATE/DELETE запрещены), identity/payload-поля `payment.operations` неизменяемы после создания (допустимы только status/process_id/updated_at); direct UPDATE/DELETE исключены для runtime/publication/migration ролей. API и worker не используют migration credentials.
+### Worker
+
+C# `Workflow.Worker` (`Worker/`) — generic исполнитель. Цикл:
+
+```text
+workflow.claim_jobs(owner, batch, leaseMs)  -> FOR UPDATE SKIP LOCKED, leaseVersion++, attempt
+  -> payload из input_constants + input_mapping (JSON Pointer)
+  -> BEGIN; api.invoke(trusted context); валидация envelope/outcome/result;
+     workflow.finish_job(jobId, owner, leaseVersion, outcome, result); COMMIT
+  -> ошибка: rollback + отдельный workflow.fail_job (retry schedule или DEAD/FAILED + TaskFailed)
+```
+
+Lease/fencing: stale finish отклоняется (`workflow.lease_stale`), reclaim сохраняет `jobId`/`executionId` и создаёт новый `attemptId`/`leaseVersion`. Роль `workflow_worker` имеет EXECUTE ровно на `workflow.claim_jobs`, `api.invoke`, `workflow.finish_job`, `workflow.fail_job` и не имеет прямого DML. Failpoints (`COURSE_FAILPOINT`): `after_job_claim` и `after_action_before_finish` — worker пишет structured log `{"event":"failpoint.reached",...}` и блокируется до остановки. Конфигурация: `COURSE_WORKER_OWNER`, `COURSE_LEASE_MS` (test profile 2000), `COURSE_POLL_INTERVAL_MS` (test profile 100).
 
 ### Проверка
 
@@ -55,36 +76,33 @@ docker compose up -d --build
 ./check.sh
 ```
 
-Открытая проверка собирает контур, публикует fixture-actions (`opencheck.probe`), гоняет матрицу безопасности/контрактов/идемпотентности и пишет `week-1-public-report.json` в корень. Также доступны smoke-тесты CLI:
-
-```bash
-./course.sh action validate /autocheck/input/manifests/opencheck-probe-v1.action.json
-```
-
-Собственные regression tests (нужен запущенный Docker):
+Открытая проверка недели 2 собирает контур с `--pull --no-cache`, поднимает стек без rebuild, применяет фикстуры (миграция, action v1/v2, карты v1/v2, invalid maps), гоняет publication/execution/versioning/concurrency/recovery/resilience/integrity сценарии и пишет `week-2-public-report.json`. Собственные regression tests (нужен запущенный Docker):
 
 ```bash
 dotnet test Api.Tests          # unit: error mapping, envelope, HTTP statuses
-dotnet test Api.IntegrationTests # integration: publication conflicts, privileges, append-only history, domain errors через HTTP (Testcontainers PostgreSQL + миграции 001..008)
+dotnet test Api.IntegrationTests # integration: publication conflicts, privileges, append-only history, domain errors через HTTP, workflow (publish/activate/start/claim/finish/fail/signal/get, lease/fencing, retry/DEAD) на Testcontainers PostgreSQL (Testcontainers PostgreSQL + миграции 001..013)
 ```
+
+На Windows `./check.sh` использует `compose-wrapper.sh`: он адаптирует MSYS-окружение (git-bash, drive-paths) и разбивает сборку worker-образов на последовательные фазы, чтобы обойти гонку BuildKit при экспорте одного image-тега двумя targets.
 
 ### Диагностика
 
 - `docker compose ps` — состояние сервисов;
-- `docker compose logs -f gateway api` — логи (JWT/payload не логируются);
-- `docker compose exec postgres psql -U postgres -d course -c "SELECT * FROM autocheck.contract_info"` — проверочные проекции;
-- `curl http://localhost:8080/health/ready` — готовность; при недоступном PostgreSQL — 503;
-- `curl http://localhost:8080/openapi/default.json` — manifest-driven OpenAPI.
+- `docker compose logs -f gateway api worker-a worker-b` — логи (JWT/payload не логируются);
+- `docker compose exec postgres psql -U postgres -d course -c "SELECT * FROM autocheck.processes"` — стабильные views (`flow_versions`, `processes`, `steps`, `jobs`, `attempts`, `signals`, `workflow_events`, `action_definitions`, `action_dispatches`);
+- `./course.sh flow get <process-id>` — компактное состояние процесса;
+- `curl http://localhost:8080/health/ready` — готовность; при недоступном PostgreSQL — 503.
 
 ### Ограничения
 
-- Идемпотентность `payment.request` — в PostgreSQL (`api.idempotency_store`, уникальность `scope_key+request_id`), без process-local lock;
-- Транзакция одна: `error`/неизвестный outcome/невалидный result откатывают весь предметный эффект;
-- В неделю 1 не входят workflow, outbox, retries и worker;
-- `timeout_ms` ограничен 30000 (`task/contracts/course-1/action-manifest.schema.json`), gateway-таймаут — 75 с;
-- Request body ограничен 64 KiB на gateway и api (Kestrel `MaxRequestBodySize`, превышение — 413 до чтения); api проверяет JWT до материализации body, неаутентифицированные запросы не читают payload;
-- Timeout и отмена клиента (`RequestAborted`) линкуются в единый токен выполнения; rollback выполняется независимым bounded-токеном (5 с), timeout отображается как `504 action.timeout` на обеих границах (api и gateway).
+- Предметные payment maps и provider-simulator/Outbox/Inbox/HMAC не входят в неделю;
+- Завершение manual шага через публичный action — неделя 3;
+- Нет BPMN XML import/export, parallel/inclusive gateways, timers, cycles, subprocesses и compensation;
+- Нет миграции запущенного process между версиями карты;
+- Нет arbitrary expressions, code, URL или SQL из карты; нет специальных C#-веток по имени flow/step/action;
+- `workflow_worker` не имеет прямого DML: все изменения workflow-состояния — через SECURITY DEFINER функции;
+- `timeout_ms` ограничен 30000; request body — 64 KiB на gateway и api.
 
 ## Task
 
-Исходное задание недели: [task/README.md](task/README.md), контракты: [task/docs/contract-reference.md](task/docs/contract-reference.md), machine schemas: [task/contracts/course-1](task/contracts/course-1).
+Задания недель: [task/week1](task/week1), [task/week2](task/week2), контракты: [08_program_and_contracts](task/week2/08_program_and_contracts/contracts/course-1).

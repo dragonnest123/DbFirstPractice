@@ -1,13 +1,15 @@
 services:
   postgres:
-    image: postgres:16
+    image: newproject-postgres:local
+    build:
+      context: .
+      dockerfile: Postgres/Dockerfile
     environment:
       POSTGRES_DB: course
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./Api/Migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d course"]
       interval: 5s
@@ -45,6 +47,33 @@ services:
       PUBLICATION_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_publication;Password=publication;Include Error Detail=false
     depends_on:
       - postgres
+
+  worker-a:
+    image: newproject-worker:local
+    build:
+      context: .
+      dockerfile: Worker/Dockerfile
+    environment:
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=workflow_worker;Password=worker;Include Error Detail=false
+      COURSE_WORKER_OWNER: worker-a
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker-b:
+    image: newproject-worker:local
+    build:
+      context: .
+      dockerfile: Worker/Dockerfile
+    x-bake:
+      output:
+        - type=cacheonly
+    environment:
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=workflow_worker;Password=worker;Include Error Detail=false
+      COURSE_WORKER_OWNER: worker-b
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata:

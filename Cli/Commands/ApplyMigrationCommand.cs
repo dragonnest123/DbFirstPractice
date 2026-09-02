@@ -1,26 +1,28 @@
+using Cli.Services;
+using Cli.Utils;
 using Shared.Utils;
 
 namespace Cli.Commands;
 
-public sealed class ApplyMigrationCommand : ICommand
+public sealed class ApplyMigrationCommand(Envelope _envelope, MigrationService _migrations) : ICommand
 {
     public string Name => "apply";
     public string Usage => "migration apply <directory>";
 
-    public async Task<int> RunAsync(string[] args, CommandContext ctx)
+    public async Task<int> RunAsync(string[] args)
     {
         if (args.Length != 1)
-            return ctx.Envelope.Error("request.invalid", $"usage: {Usage}");
+            return _envelope.Error("request.invalid", $"usage: {Usage}");
 
         var directory = args[0];
         if (!Directory.Exists(directory))
-            return ctx.Envelope.Error("request.invalid", $"migration directory not found: {directory}");
+            return _envelope.Error("request.invalid", $"migration directory not found: {directory}");
 
         var files = Directory.GetFiles(directory, "*.sql")
             .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (files.Length == 0)
-            return ctx.Envelope.Error("request.invalid", "no migration files found");
+            return _envelope.Error("request.invalid", "no migration files found");
 
         var applied = new List<string>();
         var skipped = new List<string>();
@@ -32,7 +34,7 @@ public sealed class ApplyMigrationCommand : ICommand
             {
                 var sql = await File.ReadAllTextAsync(file);
                 var checksum = HashUtil.Sha256Hex(sql);
-                var existing = await ctx.Migrations.GetMigrationChecksumAsync(filename);
+                var existing = await _migrations.GetMigrationChecksumAsync(filename);
                 
                 if (existing is not null)
                 {
@@ -41,18 +43,18 @@ public sealed class ApplyMigrationCommand : ICommand
                         skipped.Add(filename);
                         continue;
                     }
-                    return ctx.Envelope.Error("manifest.conflict", $"migration file changed after apply: {filename}");
+                    return _envelope.Error("manifest.conflict", $"migration file changed after apply: {filename}");
                 }
                 
-                await ctx.Migrations.ApplyMigrationAsync(filename, checksum, sql);
+                await _migrations.ApplyMigrationAsync(filename, checksum, sql);
                 applied.Add(filename);
             }
             catch (Exception ex)
             {
-                return ctx.Envelope.Error("migration.failed", $"failed to apply {filename}: {ex.Message}");
+                return _envelope.Error("migration.failed", $"failed to apply {filename}: {ex.Message}");
             }
         }
 
-        return ctx.Envelope.Ok(new { resource = "migration", operation = "applied", applied, skipped });
+        return _envelope.Ok(new { resource = "migration", operation = "applied", applied, skipped });
     }
 }
