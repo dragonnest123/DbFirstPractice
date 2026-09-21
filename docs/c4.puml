@@ -1,22 +1,35 @@
 @startuml c4
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
 
-Person(client, "Внешний клиент", "HTTP-клиент курса, отправляет POST /api/{module}/{action} с JWT")
+Person(client, "Внешний клиент", "HTTP-клиент курса, отправляет POST /api/{module}/{action} с JWT и Idempotency-Key")
+Person(reviewer, "Ревьюер", "Выносит ручное решение через workflow.manual (policy workflow:manual)")
 
-System_Boundary(course, "Course week-2") {
-    Container(gateway, "gateway", "C# ASP.NET Core", "Публикует 8080; whitelist-прокси /api/*, /health/*, /openapi/*; форвардит контрактные заголовки")
-    Container(api, "api", "C# ASP.NET Core", "Generic action runtime: JWT -> context, schema validation, одна Npgsql транзакция -> api.invoke")
+System_Boundary(course, "Course week-3") {
+    Container(gateway, "gateway", "C# ASP.NET Core", "Публикует 8080; whitelist-прокси /api/*, /health/*, /openapi/*; форвардит Authorization, Idempotency-Key, X-Action-Version, X-Provider-Signature")
+    Container(api, "api", "C# ASP.NET Core", "Generic action runtime: JWT -> context, X-Provider-Signature (HMAC-SHA256 по exact bytes) -> trusted transport-маркеры, schema validation, одна Npgsql транзакция -> api.invoke")
     Container(cli, "cli", "C# console", "migration apply, action publish/activate/disable, flow validate/publish/activate/start/get/signal/test-finish")
     Container(workerA, "worker-a", "C# Workflow.Worker", "claim_jobs -> api.invoke -> finish_job; lease owner worker-a")
     Container(workerB, "worker-b", "C# Workflow.Worker", "тот же image; lease owner worker-b")
-    ContainerDb(postgres, "postgres", "PostgreSQL 16", "action_catalog, workflow definitions/instances/jobs/attempts/signals/events, autocheck views")
+    ContainerDb(postgres, "postgres", "PostgreSQL 16", "action_catalog, workflow definitions/instances/jobs/attempts/signals/events, payment domain (operations/events/decisions), delivery (external_request/outbox/inbox/receipt), autocheck views")
+
+    Container(dispatcher, "outbox-dispatcher", "Python 3.12", "claim_outbox -> POST {PROVIDER_URL}/payments с Idempotency-Key/X-Correlation-ID -> succeed/fail_outbox; повторяет по policy PostgreSQL")
+    Container(adapter, "receipt-adapter", "Python 3.12", "legacy callback v0.2.0 -> receipt v1 (compact sorted JSON) + HMAC -> POST /api/receipt/accept через gateway; без PostgreSQL credentials")
+    Container(reconciler, "inbox-reconciler", "Python 3.12", "delivery.reconcile_inbox(limit) -> workflow signal; не читает таблицы")
+    Container(provider, "provider-simulator", "Go (выданный image v0.2.0)", "идемпотентный POST /payments; legacy callback; audit")
 }
 
 Rel(client, gateway, "POST /api/{module}/{action}", "HTTPS/HTTP :8080")
+Rel(reviewer, gateway, "POST /api/workflow/manual", "HTTPS/HTTP :8080")
 Rel(gateway, api, "forward по Compose DNS", "http://api:8080")
-Rel(api, postgres, "api.invoke, SELECT catalog", "Npgsql")
+Rel(api, postgres, "api.invoke, SELECT catalog, PROVIDER_HMAC_SECRET check", "Npgsql, роль course_runtime")
 Rel(cli, postgres, "migration apply, publish/activate/start/signal", "Npgsql")
 Rel(workerA, postgres, "claim_jobs / api.invoke / finish_job / fail_job", "Npgsql, роль workflow_worker")
 Rel(workerB, postgres, "claim_jobs / api.invoke / finish_job / fail_job", "Npgsql, роль workflow_worker")
+
+Rel(dispatcher, postgres, "claim_outbox / succeed_outbox / fail_outbox", "Npgsql, роль outbox_dispatcher")
+Rel(dispatcher, provider, "POST /payments", "http://provider-simulator:8081")
+Rel(provider, adapter, "POST /callbacks/provider-v02/{capability}", "http://receipt-adapter:8090")
+Rel(adapter, gateway, "POST /api/receipt/accept (signed)", "http://gateway:8080")
+Rel(reconciler, postgres, "reconcile_inbox", "Npgsql, роль inbox_reconciler")
 
 @enduml

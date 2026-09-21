@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Api.Dto;
+using Api.Contracts.Dto;
 using Api.Utils;
 using Npgsql;
 using Shared.Models;

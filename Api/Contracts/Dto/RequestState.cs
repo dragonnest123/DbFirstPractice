@@ -2,7 +2,7 @@ using System.Text.Json;
 using Shared.Models;
 using Shared.Utils;
 
-namespace Api.Dto;
+namespace Api.Contracts.Dto;
 
 public sealed record RequestState(
     string Module,
@@ -32,8 +32,20 @@ public sealed record RequestState(
         int? explicitVersion,
         string connectionString,
         string idempotencyKey,
-        string? scopeKey)
+        string? scopeKey,
+        bool signatureVerified = false,
+        int? signatureVersion = null,
+        string? bodySha256 = null)
     {
+        var transport = new Dictionary<string, object?>
+        {
+            ["signatureVerified"] = signatureVerified
+        };
+        if (signatureVersion is not null)
+            transport["signatureVersion"] = signatureVersion;
+        if (!string.IsNullOrEmpty(bodySha256))
+            transport["bodySha256"] = bodySha256;
+
         var contextJson = JsonSerializer.Serialize(new
         {
             principal,
@@ -41,7 +53,8 @@ public sealed record RequestState(
             scopes,
             correlationId,
             requestId,
-            deadline = DateTime.UtcNow.AddMilliseconds(entry.TimeoutMs).ToString("o")
+            deadline = DateTime.UtcNow.AddMilliseconds(entry.TimeoutMs).ToString("o"),
+            transport
         });
         
         return new RequestState(

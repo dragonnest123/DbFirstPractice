@@ -7,7 +7,13 @@ services:
     environment:
       POSTGRES_DB: course
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${COURSE_POSTGRES_PASSWORD:-postgres}
+      COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migration}
+      COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publication}
+      COURSE_RUNTIME_PASSWORD: ${COURSE_RUNTIME_PASSWORD:-runtime}
+      COURSE_WORKER_PASSWORD: ${COURSE_WORKER_PASSWORD:-worker}
+      COURSE_OUTBOX_PASSWORD: ${COURSE_OUTBOX_PASSWORD:-outbox}
+      COURSE_INBOX_PASSWORD: ${COURSE_INBOX_PASSWORD:-inbox}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +27,12 @@ services:
       context: .
       dockerfile: Gateway/Dockerfile
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${COURSE_GATEWAY_PORT:-8080}:8080"
+    environment:
+      COURSE_JWT_ISSUER: ${COURSE_JWT_ISSUER}
+      COURSE_JWT_AUDIENCE: ${COURSE_JWT_AUDIENCE}
+      COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY}
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-1}
     depends_on:
       - api
 
@@ -30,10 +41,12 @@ services:
       context: .
       dockerfile: Api/Dockerfile
     environment:
-      COURSE_JWT_ISSUER: moduledev-course
-      COURSE_JWT_AUDIENCE: moduledev-api
-      COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY:-course-dev-signing-key-32-bytes-minimum!!!}
-      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_runtime;Password=runtime;Include Error Detail=false
+      COURSE_JWT_ISSUER: ${COURSE_JWT_ISSUER}
+      COURSE_JWT_AUDIENCE: ${COURSE_JWT_AUDIENCE}
+      COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY}
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-1}
+      PROVIDER_HMAC_SECRET: ${PROVIDER_HMAC_SECRET}
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_runtime;Password=${COURSE_RUNTIME_PASSWORD:-runtime};Include Error Detail=false
     depends_on:
       postgres:
         condition: service_healthy
@@ -43,8 +56,8 @@ services:
       context: .
       dockerfile: Cli/Dockerfile
     environment:
-      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_migration;Password=migration;Include Error Detail=false
-      PUBLICATION_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_publication;Password=publication;Include Error Detail=false
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_migration;Password=${COURSE_MIGRATOR_PASSWORD:-migration};Include Error Detail=false
+      PUBLICATION_CONNECTION: Host=postgres;Port=5432;Database=course;Username=course_publication;Password=${COURSE_PUBLISHER_PASSWORD:-publication};Include Error Detail=false
     depends_on:
       - postgres
 
@@ -54,8 +67,9 @@ services:
       context: .
       dockerfile: Worker/Dockerfile
     environment:
-      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=workflow_worker;Password=worker;Include Error Detail=false
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=workflow_worker;Password=${COURSE_WORKER_PASSWORD:-worker};Include Error Detail=false
       COURSE_WORKER_OWNER: worker-a
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-1}
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,11 +83,70 @@ services:
       output:
         - type=cacheonly
     environment:
-      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=workflow_worker;Password=worker;Include Error Detail=false
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=course;Username=workflow_worker;Password=${COURSE_WORKER_PASSWORD:-worker};Include Error Detail=false
       COURSE_WORKER_OWNER: worker-b
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-1}
     depends_on:
       postgres:
         condition: service_healthy
+
+  outbox-dispatcher:
+    image: newproject-python:local
+    build:
+      context: .
+      dockerfile: Python/Dockerfile
+    command: ["python", "-m", "app.dispatcher"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: course
+      PGUSER: outbox_dispatcher
+      PGPASSWORD: ${COURSE_OUTBOX_PASSWORD:-outbox}
+      PROVIDER_URL: http://provider-simulator:8081
+      OUTBOX_OWNER: outbox-dispatcher
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  receipt-adapter:
+    image: newproject-python:local
+    command: ["python", "-m", "app.adapter"]
+    environment:
+      PROVIDER_CALLBACK_CAPABILITY: ${PROVIDER_CALLBACK_CAPABILITY}
+      PROVIDER_CALLBACK_TOKEN: ${PROVIDER_CALLBACK_TOKEN}
+      PROVIDER_HMAC_SECRET: ${PROVIDER_HMAC_SECRET}
+      RECEIPT_API_URL: http://gateway:8080/api/receipt/accept
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-1}
+    depends_on:
+      - gateway
+
+  inbox-reconciler:
+    image: newproject-python:local
+    command: ["python", "-m", "app.reconciler"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: course
+      PGUSER: inbox_reconciler
+      PGPASSWORD: ${COURSE_INBOX_PASSWORD:-inbox}
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  provider-simulator:
+    image: ghcr.io/fintech-dev-lab/internship-provider-simulator:v0.2.0@sha256:70e5e0dd9ab8425be84de431ec74516f9bedf5d5529077358e2e2b2037fe0c74
+    environment:
+      CALLBACK_URL: http://receipt-adapter:8090/callbacks/provider-v02/${PROVIDER_CALLBACK_CAPABILITY}
+      AUDIT_TOKEN: ${PROVIDER_AUDIT_TOKEN:-local-audit-token}
+      SIMULATOR_MODE: ${SIMULATOR_MODE:-success}
+      CALLBACK_DELAY: 200ms
+      CALLBACK_TIMEOUT: 1s
+      CALLBACK_MAX_ATTEMPTS: 5
+      CALLBACK_RETRY_DELAY: 200ms
+    depends_on:
+      - receipt-adapter
 
 volumes:
   pgdata:

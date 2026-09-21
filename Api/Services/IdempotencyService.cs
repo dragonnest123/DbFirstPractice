@@ -1,4 +1,4 @@
-using Api.Dto;
+using Api.Contracts.Dto;
 using Api.Utils;
 using Npgsql;
 using Shared.Models;
@@ -23,7 +23,7 @@ public sealed class IdempotencyService
             _ => null
         };
 
-public async Task ClaimAsync(
+    public async Task ClaimAsync(
         NpgsqlConnection conn, NpgsqlTransaction tx, string scopeKey, string requestId, string payloadHash, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(

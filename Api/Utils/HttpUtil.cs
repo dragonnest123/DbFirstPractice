@@ -1,14 +1,12 @@
-using System.Text;
-
 namespace Api.Utils;
 
 public static class HttpUtil
 {
-    public static async Task<string> ReadBodyAsync(HttpRequest request)
+    public static async Task<byte[]> ReadBodyBytesAsync(HttpRequest request)
     {
-        using var reader = new StreamReader(request.Body, Encoding.UTF8);
-        var body = await reader.ReadToEndAsync();
-        return string.IsNullOrWhiteSpace(body) ? "{}" : body;
+        using var buffer = new MemoryStream();
+        await request.Body.CopyToAsync(buffer);
+        return buffer.ToArray();
     }
 
     public static bool TryParseVersion(HttpRequest request, out int? version)

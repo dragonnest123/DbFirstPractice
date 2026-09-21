@@ -7,6 +7,7 @@ builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSingleton<JwtService>();
 builder.Services.AddSingleton(sp => new ActionCatalogService(ResolveConnectionString(sp.GetRequiredService<IConfiguration>())));
+builder.Services.AddSingleton<SignatureVerifier>();
 builder.Services.AddSingleton<DispatchService>();
 builder.Services.AddSingleton<IdempotencyService>();
 builder.Services.AddSingleton<ActionInvoker>();

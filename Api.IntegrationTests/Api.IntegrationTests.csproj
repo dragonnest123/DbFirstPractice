@@ -5,6 +5,8 @@
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
         <IsPackable>false</IsPackable>
+        <!-- NU1903: advisory on SSH.NET, a transitive test-only dependency of Testcontainers. -->
+        <NoWarn>$(NoWarn);NU1903</NoWarn>
     </PropertyGroup>
 
     <ItemGroup>

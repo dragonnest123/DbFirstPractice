@@ -1,4 +1,6 @@
-using Api.Dto;
+using System.Security.Cryptography;
+using System.Text;
+using Api.Contracts.Dto;
 using Api.Services;
 using Api.Utils;
 using Shared.Models;
@@ -15,7 +17,8 @@ public static class ActionEndpoint
         string action,
         JwtService jwt,
         ActionCatalogService actionCatalogService,
-        ActionInvoker invoker)
+        ActionInvoker invoker,
+        SignatureVerifier signatureVerifier)
     {
         var correlationId = Guid.NewGuid().ToString();
 
@@ -29,7 +32,18 @@ public static class ActionEndpoint
             || !JwtService.TryGetAuthContext(claims, out var auth))
             return Envelope.Error("auth.invalid", "invalid token", false, correlationId, explicitVersion, 401);
 
-        var payload = await HttpUtil.ReadBodyAsync(http.Request);
+        var bodyBytes = await HttpUtil.ReadBodyBytesAsync(http.Request);
+
+        var signatureHeader = http.Request.Headers.TryGetValue("X-Provider-Signature", out var sig)
+            ? sig.ToString()
+            : "";
+
+        if (!signatureVerifier.TryVerify(bodyBytes, signatureHeader, out var signatureVersion))
+            return Envelope.Error("signature.invalid", "invalid signature", false, correlationId, explicitVersion, 401);
+
+        var payload = Encoding.UTF8.GetString(bodyBytes);
+        if (string.IsNullOrWhiteSpace(payload))
+            payload = "{}";
 
         if (!ValidationUtil.IsValidJson(payload))
             return Envelope.Error("request.invalid", "invalid json", false, correlationId, null, 400);
@@ -74,7 +88,10 @@ public static class ActionEndpoint
             explicitVersion,
             actionCatalogService.ConnectionString,
             idempotencyKey,
-            scopeKey);
+            scopeKey,
+            signatureVerified: signatureHeader.Length > 0,
+            signatureVersion: signatureVersion,
+            bodySha256: Convert.ToHexString(SHA256.HashData(bodyBytes)).ToLowerInvariant());
 
         return await invoker.InvokeAsync(state, entry, http.RequestAborted);
     }

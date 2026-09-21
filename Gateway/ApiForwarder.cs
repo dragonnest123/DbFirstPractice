@@ -3,7 +3,7 @@ namespace Gateway;
 public static class ApiForwarder
 {
     private static readonly string[] _forwardedRequestHeaders = 
-        ["Authorization", "Idempotency-Key", "X-Action-Version"];
+        ["Authorization", "Idempotency-Key", "X-Action-Version", "X-Provider-Signature"];
     
     public static async Task ForwardAsync(HttpContext context, string targetPathAndQuery)
     {

@@ -1,108 +1,118 @@
-# NewProject — Week 2. Персистентное workflow-ядро
+# NewProject — Week 3. Python-периметр и платёжные процессы
 
-## Решение
+## Архитектура
 
-### Архитектура
-
-Контур состоит из шести сервисов `compose.yaml`:
+Контур `compose.yaml` состоит из десяти сервисов:
 
 ```text
 Client http://localhost:8080
   -> gateway (C# ASP.NET Core, whitelist-прокси, единственный опубликованный порт 8080)
-  -> api      (C# action runtime, внутренний, без опубликованных портов)
+  -> api      (C# action runtime + generic signature boundary, внутренний)
   -> postgres (PostgreSQL 16, база course, named volume pgdata; миграции встроены в image)
   -> worker-a / worker-b (общий C# image Workflow.Worker, lease owners worker-a/worker-b)
+  -> outbox-dispatcher / receipt-adapter / inbox-reconciler (один Python 3.12 image, три entrypoints)
+  -> provider-simulator (выданный Go image v0.2.0 по digest)
 cli (C#) -> postgres (migration apply, action/flow publish/activate, flow start/get/signal)
 ```
 
-Единственная точка предметного выполнения — PostgreSQL-функция `api.invoke(...)` (SECURITY DEFINER, владелец `course_owner` NOLOGIN). C#-слой `api` выполняет JWT-аутентификацию, резолв action из immutable каталога `api.action_catalog`, валидацию request/response схем и управляет одной транзакцией вокруг `api.invoke`. Новые actions регистрируются манифестом через `cli` без пересборки `gateway`/`api`.
+Интеграционный периметр недели 3:
 
-Workflow-ядро недели 2 исполняет произвольные карты `course-1`: worker забирает jobs через `workflow.claim_jobs`, вызывает закреплённый action через `api.invoke` в trusted-контексте `workflow-worker` (principal, processId, jobId, executionId, attemptId, deadline) и завершает через `workflow.finish_job` в одной транзакции с эффектом. Публикация новых action и карт после сборки не требует изменения C#. Подробная схема контейнеров: [C4](docs/c4.puml). Решения по границам доверия: [ADR-001](docs/adr-001-trust-boundary.md), [ADR-002](docs/adr-002-technical-vs-domain-result.md), [ADR-003](docs/adr-003-lease-fencing.md).
+```text
+Outbox -> Python outbox-dispatcher -> provider v0.2.0
+provider legacy callback -> Python receipt-adapter -> gateway -> generic C# API -> receipt.accept -> Inbox
+Inbox -> Python inbox-reconciler -> workflow signal -> generic C# worker -> final action
+```
 
-### Запуск
+Единственная точка предметного выполнения — PostgreSQL-функция `api.invoke(...)`. C#-слой `api` выполняет JWT-аутентификацию, проверку `X-Provider-Signature` (HMAC-SHA256 по exact body bytes, constant-time) и кладёт в trusted-контекст только `transport.signatureVerified`/`transport.signatureVersion`/`transport.bodySha256`, затем резолвит immutable каталог `api.action_catalog`, валидирует request/response схемы и управляет одной транзакцией вокруг `api.invoke`. Python не выбирает flow, лимит, переход или финальный статус и не хранит авторитетное состояние. Подробная схема: [C4](docs/c4.puml), решения: [ADR-001](docs/adr-001-trust-boundary.md), [ADR-002](docs/adr-002-technical-vs-domain-result.md), [ADR-003](docs/adr-003-lease-fencing.md), [ADR-004](docs/adr-004-trust-boundary-acl.md).
 
-Prerequisites: Docker с Docker Compose v2, Python 3 для открытой проверки.
+Два платёжных процесса исполняются общим workflow-ядром без веток по именам flow/action:
+
+- `payment-processing`: `validate -> prepare_external -> wait_receipt -> apply_receipt -> complete|reject -> end`;
+- `payment-review`: `validate -> check_limit -> [WITHIN_LIMIT] approve -> end | [REVIEW_REQUIRED] manual -> approve|reject -> end`.
+
+Server-side binding: `PAYMENT_EXECUTION -> payment-processing`, `PAYMENT_APPROVAL -> payment-review`. Лимит `course-limit-v1`: до `100000.00 RUB` включительно — auto approve, выше — manual.
+
+## Запуск
+
+Prerequisites: Docker с Docker Compose v2 (`!override`/`!reset`, `config --no-env-resolution`), Python 3.11+ для проверки.
+
+Переменные (без `COURSE_*`/`PROVIDER_*`-значений контур не стартует корректно; для локального запуска задайте их в окружении или `.env`, не коммитьте реальные секреты):
 
 ```bash
+export COURSE_JWT_ISSUER=moduledev-course
+export COURSE_JWT_AUDIENCE=moduledev-api
+export COURSE_JWT_SIGNING_KEY=<ключ HS256>
+export PROVIDER_CALLBACK_CAPABILITY=<непредсказуемый сегмент>
+export PROVIDER_CALLBACK_TOKEN=<JWT principal receipt-provider, scope receipt:write>
+export PROVIDER_HMAC_SECRET=<ключ HMAC>
 docker compose up -d --build
 ```
 
 После старта без ручных SQL-команд доступны:
 
 - `POST http://localhost:8080/api/payment/request` — создать операцию (JWT + Idempotency-Key);
-- `POST http://localhost:8080/api/operation/get` — прочитать операцию;
-- `POST http://localhost:8080/api/workflow/get` — полное состояние процесса (policy `workflow:read`);
-- `GET http://localhost:8080/health/live`, `/health/ready`, `/openapi/default.json`;
-- `./course.sh flow start workflow-smoke --business-key <key> --data <file>` — запустить smoke-процесс.
+- `POST http://localhost:8080/api/payment/submit` — привязать operation к flow по server-side binding;
+- `POST http://localhost:8080/api/operation/events` — события операции;
+- `POST http://localhost:8080/api/workflow/manual` — ручное решение (policy `workflow:manual`);
+- `POST http://localhost:8080/api/receipt/accept` — подписанная квитанция (policy `receipt:write`);
+- `GET http://localhost:8080/health/live`, `/health/ready`, `/openapi/default.json`.
 
-Проверка:
+## Python-периметр
 
-```bash
-./check.sh
-```
+Один локально собранный image `newproject-python:local` (`Python/Dockerfile`, Python 3.12) с тремя entrypoints:
 
-### Workflow-карты
+| Процесс | Вход | Выход | Не делает |
+|---|---|---|---|
+| `outbox-dispatcher` | `delivery.claim_outbox(owner, limit)` | `POST {PROVIDER_URL}/payments` с `Idempotency-Key=externalRequestId`/`X-Correlation-ID`, затем `succeed/fail_outbox` | не меняет operation/process, не выбирает retry-политику |
+| `receipt-adapter` | legacy callback `/callbacks/provider-v02/{capability}` | signed receipt v1 → `POST /api/receipt/accept` через gateway | не подключается к PostgreSQL, не хранит состояние |
+| `inbox-reconciler` | `delivery.reconcile_inbox(limit)` | workflow signal (через `workflow.accept_signal`) | не читает/не меняет таблицы, не исполняет flow |
 
-Карта `course-1` — JSON (или YAML) документ с `flow_name`, immutable `version`, `start_step`, шагами и переходами:
+Службы не публикуют host-портов. Python-код и unit-тесты: `Python/app`, `Python/tests`.
 
-| Тип шага | Поведение |
-|---|---|
-| `automatic` | создаёт job и вызывает зарегистрированный action через `api.invoke` |
-| `wait_signal` | долговечно ждёт идемпотентный сигнал (`flow signal`) |
-| `manual` | долговечно ждёт решение (на неделе 2 — до `WAITING_MANUAL`) |
-| `end` | завершает процесс с объявленным outcome |
+## Provider
 
-Переходы — по конечному `outcome` (exclusive routing). Публикация создаёт immutable `flow_version`; `flow activate` выбирает активную версию для новых процессов, уже запущенные остаются pinned. Встроенные карты: `workflow-smoke` v1 (`automatic → wait_signal → end`, action `training.canary` v1) и v2 (action v2, другой сигнал и outcome — доказуемо другой `flow_version`), `manual-wait` (до `WAITING_MANUAL`). Пример: [workflow-map.example.json](task/week2/08_program_and_contracts/contracts/course-1/workflow-map.example.json), схема: [workflow-map.schema.json](task/week2/08_program_and_contracts/contracts/course-1/workflow-map.schema.json).
+Используется выданный image `ghcr.io/fintech-dev-lab/internship-provider-simulator:v0.2.0` по закреплённому digest. `provider-simulator` принимает идемпотентный `POST /payments` и отправляет legacy callback без JWT/HMAC на `CALLBACK_URL` (capability передаётся через `PROVIDER_CALLBACK_CAPABILITY`). Подпись создаёт только Python-адаптер: compact sorted JSON, `X-Provider-Signature: v1=<lowercase hex>`, exact UTF-8 body bytes. Подробности статусов/error codes: `task/week3/docs/external-contracts.md`.
 
-CLI: `flow validate/publish/list/activate/start/get/signal`; `flow test-finish` доступен только при `COURSE_TEST_PROFILE=1` и вызывает production finish-границу. Validator проверяет JSON Schema, граф (один start, достижимость, ацикличность, покрытие outcomes), соответствие action и policy, JSON Pointer mapping (RFC 6901) и bounded retry.
+## Проверка
 
-### Worker
-
-C# `Workflow.Worker` (`Worker/`) — generic исполнитель. Цикл:
-
-```text
-workflow.claim_jobs(owner, batch, leaseMs)  -> FOR UPDATE SKIP LOCKED, leaseVersion++, attempt
-  -> payload из input_constants + input_mapping (JSON Pointer)
-  -> BEGIN; api.invoke(trusted context); валидация envelope/outcome/result;
-     workflow.finish_job(jobId, owner, leaseVersion, outcome, result); COMMIT
-  -> ошибка: rollback + отдельный workflow.fail_job (retry schedule или DEAD/FAILED + TaskFailed)
-```
-
-Lease/fencing: stale finish отклоняется (`workflow.lease_stale`), reclaim сохраняет `jobId`/`executionId` и создаёт новый `attemptId`/`leaseVersion`. Роль `workflow_worker` имеет EXECUTE ровно на `workflow.claim_jobs`, `api.invoke`, `workflow.finish_job`, `workflow.fail_job` и не имеет прямого DML. Failpoints (`COURSE_FAILPOINT`): `after_job_claim` и `after_action_before_finish` — worker пишет structured log `{"event":"failpoint.reached",...}` и блокируется до остановки. Конфигурация: `COURSE_WORKER_OWNER`, `COURSE_LEASE_MS` (test profile 2000), `COURSE_POLL_INTERVAL_MS` (test profile 100).
-
-### Проверка
+Открытый checker недели 3 запускается из отдельного клона пакета:
 
 ```bash
-./check.sh
+./check.sh --repo /path/to/participant-solution
 ```
 
-Открытая проверка недели 2 собирает контур с `--pull --no-cache`, поднимает стек без rebuild, применяет фикстуры (миграция, action v1/v2, карты v1/v2, invalid maps), гоняет publication/execution/versioning/concurrency/recovery/resilience/integrity сценарии и пишет `week-2-public-report.json`. Собственные regression tests (нужен запущенный Docker):
+или из этого репозитория:
 
 ```bash
-dotnet test Api.Tests          # unit: error mapping, envelope, HTTP statuses
-dotnet test Api.IntegrationTests # integration: publication conflicts, privileges, append-only history, domain errors через HTTP, workflow (publish/activate/start/claim/finish/fail/signal/get, lease/fencing, retry/DEAD) на Testcontainers PostgreSQL (Testcontainers PostgreSQL + миграции 001..013)
+./task/week3/check.sh --repo .
 ```
 
-На Windows `./check.sh` использует `compose-wrapper.sh`: он адаптирует MSYS-окружение (git-bash, drive-paths) и разбивает сборку worker-образов на последовательные фазы, чтобы обойти гонку BuildKit при экспорте одного image-тега двумя targets.
+Checker собирает контур с `--pull --no-cache`, поднимает изолированный Compose project, прогоняет admission/startup/outbox/receipt/review/recovery/security и пишет `week-3-public-report.json` (без баллов и секретов). Коды завершения: `0` — все public checks пройдены, `1` — нарушен контракт решения, `2` — окружение/checker не готовы.
 
-### Диагностика
+Локальные тесты:
+
+```bash
+dotnet test Api.Tests
+dotnet test Api.IntegrationTests    # нужен Docker (Testcontainers PostgreSQL, миграции 001..016)
+python -m pytest Python/tests
+```
+
+## Диагностика
 
 - `docker compose ps` — состояние сервисов;
-- `docker compose logs -f gateway api worker-a worker-b` — логи (JWT/payload не логируются);
-- `docker compose exec postgres psql -U postgres -d course -c "SELECT * FROM autocheck.processes"` — стабильные views (`flow_versions`, `processes`, `steps`, `jobs`, `attempts`, `signals`, `workflow_events`, `action_definitions`, `action_dispatches`);
-- `./course.sh flow get <process-id>` — компактное состояние процесса;
-- `curl http://localhost:8080/health/ready` — готовность; при недоступном PostgreSQL — 503.
+- `docker compose logs -f gateway api worker-a worker-b outbox-dispatcher receipt-adapter inbox-reconciler` — логи (секреты, JWT, подписи, полные тела и `message` не логируются);
+- `docker compose exec postgres psql -U postgres -d course -c "SELECT * FROM autocheck.outbox"` — стабильные views недели 3: `external_requests`, `receipts`, `outbox`, `inbox`, `decisions` (плюс views недель 1–2);
+- `./course.sh flow get <process-id>` — компактное состояние процесса.
 
-### Ограничения
+## Ограничения
 
-- Предметные payment maps и provider-simulator/Outbox/Inbox/HMAC не входят в неделю;
-- Завершение manual шага через публичный action — неделя 3;
-- Нет BPMN XML import/export, parallel/inclusive gateways, timers, cycles, subprocesses и compensation;
-- Нет миграции запущенного process между версиями карты;
-- Нет arbitrary expressions, code, URL или SQL из карты; нет специальных C#-веток по имени flow/step/action;
-- `workflow_worker` не имеет прямого DML: все изменения workflow-состояния — через SECURITY DEFINER функции;
-- `timeout_ms` ограничен 30000; request body — 64 KiB на gateway и api.
+- Python не принимает предметных решений и не хранит авторитетное состояние; роли `outbox_dispatcher`/`inbox_reconciler` имеют EXECUTE ровно на закреплённые `delivery.*` функции и не имеют прямого DML.
+- Provider-simulator — выданный компонент; его память не переживает recreate (такого требования к нему нет).
+- Один messageId — одна дедупликационная область: duplicate возвращает исходный result, conflicting body даёт `409 idempotency.conflict`.
+- Нет нескольких dispatcher/reconciler, jitter, финального dead-letter и failpoint-run — это неделя 4.
+- C# API/worker images не пересобираются из-за имён flow/action; обе карты исполняются generic-ядром без специальных веток.
+- `workflow_worker` не имеет прямого DML; request body — 64 KiB на gateway/api/adapter.
 
 ## Task
 
-Задания недель: [task/week1](task/week1), [task/week2](task/week2), контракты: [08_program_and_contracts](task/week2/08_program_and_contracts/contracts/course-1).
+Задания недель: [task/week1](task/week1), [task/week2](task/week2), [task/week3](task/week3). Контракты недели 3: `task/week3/contracts/course-1`, полный контракт: `task/week3/docs/04-week-3.md`.
