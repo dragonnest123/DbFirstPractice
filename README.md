@@ -81,9 +81,10 @@ docker compose up -d --build
 ./check.sh --repo /path/to/participant-solution
 ```
 
-или из этого репозитория:
+или из этого репозитория (обе команды равнозначны):
 
 ```bash
+./check.sh --repo .
 ./task/week3/check.sh --repo .
 ```
 

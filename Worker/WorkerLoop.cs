@@ -125,8 +125,18 @@ public sealed class WorkerLoop
             return;
         }
 
-        var requestSchema = LoadSchema(action["requestSchema"]);
-        if (requestSchema is not null && !requestSchema.Evaluate(payload).IsValid)
+        JsonSchema requestSchema;
+        try
+        {
+            requestSchema = LoadSchema(action["requestSchema"]);
+        }
+        catch (Exception ex)
+        {
+            Log("job.schema_load_failed", new { jobId, error = ex.Message });
+            await FailJobAsync(job, "workflow.contract_invalid", false);
+            return;
+        }
+        if (!requestSchema.Evaluate(payload).IsValid)
         {
             await FailJobAsync(job, "workflow.payload_invalid", false);
             return;
@@ -192,8 +202,19 @@ public sealed class WorkerLoop
             }
 
             var result = envelope["result"];
-            var responseSchema = LoadSchema(action["responseSchema"]);
-            if (result is null || (responseSchema is not null && !responseSchema.Evaluate(result).IsValid))
+            JsonSchema responseSchema;
+            try
+            {
+                responseSchema = LoadSchema(action["responseSchema"]);
+            }
+            catch (Exception ex)
+            {
+                Log("job.schema_load_failed", new { jobId, error = ex.Message });
+                await RollbackAsync(tx, linkedCts.Token);
+                await FailJobAsync(job, "workflow.contract_invalid", false);
+                return;
+            }
+            if (result is null || !responseSchema.Evaluate(result).IsValid)
             {
                 await RollbackAsync(tx, linkedCts.Token);
                 await FailJobAsync(job, "workflow.response_invalid", false);
@@ -271,18 +292,11 @@ public sealed class WorkerLoop
         return outcomes.Any(item => item?.GetValue<string>() == outcome);
     }
 
-    private static JsonSchema? LoadSchema(JsonNode? node)
+    private static JsonSchema LoadSchema(JsonNode? node)
     {
         if (node is null)
-            return null;
-        try
-        {
-            return JsonSchema.FromText(node.ToJsonString());
-        }
-        catch
-        {
-            return null;
-        }
+            throw new InvalidOperationException("schema is missing");
+        return JsonSchema.FromText(node.ToJsonString());
     }
 
     private static async Task<string> InvokeAsync(

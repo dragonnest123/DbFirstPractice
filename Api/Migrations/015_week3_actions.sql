@@ -1,6 +1,3 @@
--- Week 3: delivery SQL boundary, payment/review actions, workflow.manual, catalog.
-
--- Retry policy for outbox (test profile values; week 4 moves to configurable runtime).
 CREATE TABLE IF NOT EXISTS delivery.outbox_policy (
     id boolean PRIMARY KEY DEFAULT true CHECK (id),
     max_attempts integer NOT NULL,
@@ -96,24 +93,24 @@ SECURITY DEFINER
 SET search_path = pg_catalog, delivery
 AS $$
 DECLARE
-    v_external text;
     v_attempts integer;
+    v_updated integer;
     v_max integer;
     v_delay integer;
     v_retryable boolean;
 BEGIN
-    SELECT external_request_id, attempt_count INTO v_external, v_attempts
+    v_retryable := p_error_code LIKE '%.retryable';
+
+    SELECT attempt_count INTO v_attempts
     FROM delivery.outbox
     WHERE outbox_id = p_outbox_id
       AND lease_owner = p_owner
       AND lease_version = p_lease_version
       AND state = 'LEASED';
-
-    IF v_external IS NULL THEN
+    IF NOT FOUND THEN
         RETURN jsonb_build_object('status', 'stale');
     END IF;
 
-    v_retryable := p_error_code LIKE '%.retryable';
     IF v_retryable THEN
         SELECT max_attempts, COALESCE(delays_ms[v_attempts], 1000) INTO v_max, v_delay
         FROM delivery.outbox_policy;
@@ -122,14 +119,28 @@ BEGIN
             SET state = 'RETRY_WAIT', lease_owner = NULL, lease_until = NULL,
                 next_attempt_at = clock_timestamp() + make_interval(secs => v_delay / 1000.0),
                 last_error_code = p_error_code
-            WHERE outbox_id = p_outbox_id;
+            WHERE outbox_id = p_outbox_id
+              AND lease_owner = p_owner
+              AND lease_version = p_lease_version
+              AND state = 'LEASED';
+            GET DIAGNOSTICS v_updated = ROW_COUNT;
+            IF v_updated = 0 THEN
+                RETURN jsonb_build_object('status', 'stale');
+            END IF;
             RETURN jsonb_build_object('status', 'scheduled', 'nextAttemptAt', v_delay);
         END IF;
     END IF;
 
     UPDATE delivery.outbox
     SET state = 'DEAD', lease_owner = NULL, lease_until = NULL, last_error_code = p_error_code
-    WHERE outbox_id = p_outbox_id;
+    WHERE outbox_id = p_outbox_id
+      AND lease_owner = p_owner
+      AND lease_version = p_lease_version
+      AND state = 'LEASED';
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+    IF v_updated = 0 THEN
+        RETURN jsonb_build_object('status', 'stale');
+    END IF;
 
     RETURN jsonb_build_object('status', 'dead', 'errorCode', p_error_code);
 END;
@@ -210,7 +221,6 @@ BEGIN
 END;
 $$;
 
--- Generic WAIT_SIGNAL entry also applies already-saved Inbox (early receipt).
 CREATE OR REPLACE FUNCTION workflow._enter_step(p_process_id uuid, p_step_key text)
 RETURNS void
 LANGUAGE plpgsql
@@ -280,7 +290,6 @@ BEGIN
 END;
 $$;
 
--- Server-side binding: operationKind -> flow.
 CREATE TABLE IF NOT EXISTS payment.flow_binding (
     operation_kind text PRIMARY KEY,
     flow_name text NOT NULL,
@@ -290,13 +299,14 @@ INSERT INTO payment.flow_binding(operation_kind, flow_name)
 VALUES ('PAYMENT_EXECUTION', 'payment-processing'), ('PAYMENT_APPROVAL', 'payment-review')
 ON CONFLICT (operation_kind) DO NOTHING;
 
--- Relax operation event types.
 ALTER TABLE payment.operation_events DROP CONSTRAINT IF EXISTS operation_events_event_type_check;
 ALTER TABLE payment.operation_events
     ADD CONSTRAINT operation_events_event_type_check
     CHECK (event_type IN ('OPERATION_CREATED','OPERATION_SUBMITTED','OPERATION_COMPLETED','OPERATION_REJECTED'));
 
--- Domain error helper for action targets.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_operation_events_submit_once
+    ON payment.operation_events(operation_id) WHERE event_type = 'OPERATION_SUBMITTED';
+
 CREATE OR REPLACE FUNCTION payment._domain_error(p_code text, p_message text, p_correlation text)
 RETURNS jsonb
 LANGUAGE sql
@@ -312,8 +322,6 @@ AS $$
     );
 $$;
 
--- Status transition executed as course_owner so course_target (and course_migration)
--- never get direct DML on payment.operations/operation_events.
 CREATE OR REPLACE FUNCTION payment._set_status(
     p_op_id uuid, p_status text, p_event text, p_payload_hash text, p_process_id uuid DEFAULT NULL)
 RETURNS void
@@ -324,9 +332,11 @@ AS $$
 BEGIN
     UPDATE payment.operations
     SET status = p_status, process_id = COALESCE(p_process_id, process_id)
-    WHERE operation_id = p_op_id;
-    INSERT INTO payment.operation_events(event_id, operation_id, event_type, payload_hash)
-    VALUES (gen_random_uuid(), p_op_id, p_event, p_payload_hash);
+    WHERE operation_id = p_op_id AND status <> p_status;
+    IF FOUND THEN
+        INSERT INTO payment.operation_events(event_id, operation_id, event_type, payload_hash)
+        VALUES (gen_random_uuid(), p_op_id, p_event, p_payload_hash);
+    END IF;
 END;
 $$;
 
@@ -746,6 +756,8 @@ DECLARE
     v_outcome text := p_payload ->> 'outcome';
     v_provider_id text := p_payload ->> 'providerPaymentId';
     v_version integer := (p_payload ->> 'version')::integer;
+    v_occurred_at text := p_payload ->> 'occurredAt';
+    v_occurred_ts timestamptz;
     v_external delivery.external_request%ROWTYPE;
     v_existing delivery.inbox%ROWTYPE;
     v_proc_id uuid;
@@ -763,6 +775,17 @@ BEGIN
     IF v_body_hash IS NULL OR v_body_hash !~ '^[0-9a-f]{64}$' THEN
         RETURN payment._domain_error('signature.invalid', 'body hash is missing', v_correlation);
     END IF;
+
+    IF v_occurred_at IS NULL
+       OR length(v_occurred_at) > 64
+       OR v_occurred_at !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$' THEN
+        RETURN payment._domain_error('payload.invalid', 'invalid occurredAt', v_correlation);
+    END IF;
+    BEGIN
+        v_occurred_ts := v_occurred_at::timestamptz;
+    EXCEPTION WHEN others THEN
+        RETURN payment._domain_error('payload.invalid', 'invalid occurredAt', v_correlation);
+    END;
 
     SELECT * INTO v_external FROM delivery.external_request WHERE external_request_id = v_external_id;
     IF NOT FOUND THEN
@@ -927,7 +950,6 @@ EXCEPTION
 END;
 $$;
 
--- Ownership and grants for week-3 functions.
 ALTER FUNCTION delivery.claim_outbox(text,integer) OWNER TO course_owner;
 ALTER FUNCTION delivery.succeed_outbox(uuid,text,bigint,text) OWNER TO course_owner;
 ALTER FUNCTION delivery.fail_outbox(uuid,text,bigint,text) OWNER TO course_owner;
@@ -973,7 +995,6 @@ GRANT EXECUTE ON FUNCTION payment.receipt_accept_v1(jsonb,jsonb) TO course_owner
 GRANT EXECUTE ON FUNCTION payment.operation_events_v1(jsonb,jsonb) TO course_owner;
 GRANT EXECUTE ON FUNCTION workflow.manual_v1(jsonb,jsonb) TO course_owner;
 
--- course_target needs workflow internals to submit, decide and advance.
 GRANT EXECUTE ON FUNCTION workflow.start_process(text,text,jsonb) TO course_target;
 GRANT EXECUTE ON FUNCTION workflow._advance(uuid,text) TO course_target;
 GRANT SELECT, UPDATE ON workflow.process_instance TO course_target;
@@ -982,23 +1003,17 @@ GRANT SELECT, INSERT ON workflow.workflow_event TO course_target;
 GRANT SELECT, UPDATE ON workflow.workflow_signal TO course_target;
 GRANT USAGE ON SCHEMA workflow TO course_target;
 
--- Rediscover after blanket revokes: ensure explicit grants are preserved.
 GRANT EXECUTE ON FUNCTION payment.request_v1(jsonb,jsonb) TO course_owner;
 GRANT EXECUTE ON FUNCTION payment.get_v1(jsonb,jsonb) TO course_owner;
 GRANT EXECUTE ON FUNCTION training.canary_v1(jsonb,jsonb) TO course_owner;
 GRANT EXECUTE ON FUNCTION training.canary_v2(jsonb,jsonb) TO course_owner;
 
--- Domain tables created by week-3 migrations: ownership and grants.
--- course_target reads payment.operations (already granted in 005); status
--- transitions go through payment._set_status owned by course_owner so that
--- course_migration (member of course_target) never gets direct DML.
 ALTER TABLE payment.flow_binding OWNER TO course_owner;
 ALTER TABLE delivery.outbox_policy OWNER TO course_owner;
 GRANT SELECT, INSERT ON payment.flow_binding TO course_target;
 GRANT SELECT ON delivery.outbox_policy TO course_target;
 GRANT SELECT ON payment.operation_events TO course_target;
 
--- Catalog: payment.submit.
 INSERT INTO api.action_catalog(module, action, version, http_method, target_schema, target_function, request_schema, response_schema, outcomes, required_policy, idempotency_mode, idempotency_scope, timeout_ms, enabled, is_default, contract_version)
 VALUES ('payment','submit',1,'POST','payment','submit_v1',
  '{
@@ -1024,7 +1039,6 @@ VALUES ('payment','submit',1,'POST','payment','submit_v1',
  'required','principal_action',2000,true,true,'course-1')
 ON CONFLICT (module,action,version) DO NOTHING;
 
--- Catalog: operation.events.
 INSERT INTO api.action_catalog(module, action, version, http_method, target_schema, target_function, request_schema, response_schema, outcomes, required_policy, idempotency_mode, idempotency_scope, timeout_ms, enabled, is_default, contract_version)
 VALUES ('operation','events',1,'POST','payment','operation_events_v1',
  '{
@@ -1047,7 +1061,6 @@ VALUES ('operation','events',1,'POST','payment','operation_events_v1',
  'none','none',2000,true,true,'course-1')
 ON CONFLICT (module,action,version) DO NOTHING;
 
--- Catalog: internal payment actions (worker-invoked via api.invoke).
 INSERT INTO api.action_catalog(module, action, version, http_method, target_schema, target_function, request_schema, response_schema, outcomes, required_policy, idempotency_mode, idempotency_scope, timeout_ms, enabled, is_default, contract_version)
 VALUES
 ('payment','validate',1,'POST','payment','validate_v1',
@@ -1184,11 +1197,11 @@ VALUES ('receipt','accept',1,'POST','payment','receipt_accept_v1',
     "type":"object","additionalProperties":false,
     "required":["externalRequestId","messageId","occurredAt","outcome","providerPaymentId","version"],
     "properties":{
-      "externalRequestId":{"type":"string","minLength":1,"maxLength":128},
-      "messageId":{"type":"string","minLength":1,"maxLength":128},
-      "occurredAt":{"type":"string","maxLength":64},
+      "externalRequestId":{"type":"string","minLength":1,"maxLength":128,"not":{"pattern":"[\\r\\n]"}},
+      "messageId":{"type":"string","minLength":1,"maxLength":128,"not":{"pattern":"[\\r\\n]"}},
+      "occurredAt":{"type":"string","format":"date-time","maxLength":64,"pattern":"Z$","not":{"pattern":"[\\r\\n]"}},
       "outcome":{"enum":["COMPLETED","REJECTED"]},
-      "providerPaymentId":{"type":"string","minLength":1,"maxLength":128},
+      "providerPaymentId":{"type":"string","minLength":1,"maxLength":128,"not":{"pattern":"[\\r\\n]"}},
       "version":{"const":1}
     }
   }'::jsonb,

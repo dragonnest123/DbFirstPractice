@@ -7,16 +7,11 @@ using Xunit;
 namespace Api.IntegrationTests;
 
 [Collection("course-db")]
-public class WorkflowIntegrationTests
+public class WorkflowIntegrationTests : WorkflowTestBase
 {
-    private readonly CourseDbFixture _db;
-
-    public WorkflowIntegrationTests(CourseDbFixture db)
+    public WorkflowIntegrationTests(CourseDbFixture db) : base(db)
     {
-        _db = db;
     }
-
-    private FlowService Flows() => new(_db.PublicationConnection);
 
     // ---------- Publication ----------
 
@@ -131,8 +126,66 @@ public class WorkflowIntegrationTests
         Assert.Equal(1, job["task"]!["actionVersion"]!.GetValue<int>());
         Assert.Equal(3, job["task"]!["retry"]!["max_attempts"]!.GetValue<int>());
         Assert.NotNull(job["action"]!["outcomes"]);
+        Assert.NotNull(job["action"]!["requestSchema"]);
         Assert.NotNull(job["action"]!["responseSchema"]);
         Assert.Equal("x", job["processData"]!["value"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Claim_LeasesJob_StartsAttempt_MarksStepRunning()
+    {
+        var process = await StartSeededProcessAsync();
+        var job = await ClaimForAsync(process.ProcessId);
+        var jobId = job["jobId"]!.GetValue<string>();
+
+        var jobState = await Db.ScalarAsync(_db.SuperuserConnection,
+            $"SELECT state||'|'||lease_owner FROM autocheck.jobs WHERE job_id='{jobId}'");
+        Assert.Equal("LEASED|it-owner", jobState);
+        var attempt = await Db.ScalarAsync(_db.SuperuserConnection,
+            $"SELECT status FROM autocheck.attempts WHERE job_id='{jobId}'");
+        Assert.Equal("RUNNING", attempt);
+        var stepState = await Db.ScalarAsync(_db.SuperuserConnection,
+            $"SELECT state FROM autocheck.steps WHERE process_id='{process.ProcessId}'");
+        Assert.Equal("RUNNING", stepState);
+    }
+
+    [Fact]
+    public async Task Lease_WithoutRunningStep_IsRejected()
+    {
+        var process = await StartSeededProcessAsync();
+        var jobId = await Db.ScalarAsync(_db.SuperuserConnection,
+            $"SELECT job_id::text FROM workflow.workflow_job WHERE process_id='{process.ProcessId}'");
+
+        var ex = await Db.ExecErrorAsync(_db.SuperuserConnection,
+            $"UPDATE workflow.workflow_job SET state='LEASED', lease_owner='rogue', " +
+            "lease_version=lease_version+1, lease_until=clock_timestamp()+interval '1 hour' " +
+            $"WHERE job_id='{jobId}'");
+        Assert.Equal("P0001", ex.SqlState);
+        Assert.Contains("workflow.lease_inconsistent", ex.MessageText);
+
+        var state = await Db.ScalarAsync(_db.SuperuserConnection,
+            $"SELECT state FROM workflow.workflow_job WHERE job_id='{jobId}'");
+        Assert.Equal("READY", state);
+    }
+
+    [Fact]
+    public async Task Reclaim_AfterLeaseExpiry_StalesAttemptAndKeepsStepRunning()
+    {
+        var process = await StartSeededProcessAsync();
+        var first = await ClaimForAsync(process.ProcessId);
+        var jobId = first["jobId"]!.GetValue<string>();
+
+        await Task.Delay(2500);
+
+        var second = await ClaimForAsync(process.ProcessId);
+        Assert.Equal(2, second["attemptNumber"]!.GetValue<int>());
+
+        var attempts = await Db.ScalarAsync(_db.SuperuserConnection,
+            $"SELECT string_agg(status, ',' ORDER BY attempt_number) FROM autocheck.attempts WHERE job_id='{jobId}'");
+        Assert.Equal("STALE,RUNNING", attempts);
+        var stepState = await Db.ScalarAsync(_db.SuperuserConnection,
+            $"SELECT state FROM autocheck.steps WHERE process_id='{process.ProcessId}'");
+        Assert.Equal("RUNNING", stepState);
     }
 
     [Fact]
@@ -296,67 +349,4 @@ public class WorkflowIntegrationTests
     }
 
     // ---------- helpers ----------
-
-    private async Task<(string ProcessId, JsonElement Started)> StartSeededProcessAsync()
-    {
-        var started = await ResultAsync(Flows().StartAsync(
-            "workflow-smoke", "it-bk-" + Guid.NewGuid().ToString("N")[..10], """{"value":"x"}"""));
-        return (started.RootElement.GetProperty("processId").GetString()!,
-                started.RootElement.Clone());
-    }
-
-    private async Task<JsonObject> ClaimForAsync(string processId)
-    {
-        for (var attempt = 0; attempt < 100; attempt++)
-        {
-            var raw = await Db.ScalarAsync(_db.WorkerConnection,
-                "SELECT workflow.claim_jobs('it-owner',10,2000)::text");
-            using var doc = JsonDocument.Parse(raw!);
-            foreach (var item in doc.RootElement.EnumerateArray())
-            {
-                if (item.TryGetProperty("processId", out var pid)
-                    && pid.GetString() == processId)
-                    return (JsonObject)JsonNode.Parse(item.GetRawText())!;
-            }
-            await Task.Delay(50);
-        }
-        throw new Xunit.Sdk.XunitException($"no claimable job for process {processId}");
-    }
-
-    private static async Task<JsonDocument> ResultAsync(Task<string> task) => JsonDocument.Parse(await task);
-
-    private static string BuildMap(string flowName, int version)
-    {
-        return $$"""
-        {
-          "contract_version": "course-1",
-          "flow_name": "{{flowName}}",
-          "version": {{version}},
-          "start_step": "invoke",
-          "steps": [
-            {
-              "key": "invoke",
-              "type": "automatic",
-              "task": {
-                "service": "postgres",
-                "module": "training",
-                "action": "canary",
-                "action_version": 1,
-                "required_policy": ["workflow:execute"],
-                "timeout_ms": 2000,
-                "retry": {"max_attempts": 3, "delays_ms": [100, 200]},
-                "input_mapping": {"/value": "/value"},
-                "input_constants": {}
-              }
-            },
-            {"key": "wait", "type": "wait_signal", "signal_type": "training.completed", "outcome": "RECEIVED"},
-            {"key": "done", "type": "end", "outcome": "COMPLETED"}
-          ],
-          "transitions": [
-            {"from": "invoke", "outcome": "APPLIED", "to": "wait"},
-            {"from": "wait", "outcome": "RECEIVED", "to": "done"}
-          ]
-        }
-        """;
-    }
 }

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
+from datetime import datetime
 
 REQUIRED_LEGACY_FIELDS = {
     "providerPaymentId",
@@ -13,6 +15,17 @@ REQUIRED_LEGACY_FIELDS = {
 }
 
 _TEXT_FIELDS = ("providerPaymentId", "operationId", "occurredAt")
+
+_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
+
+
+def _validate_occurred_at(value: str) -> None:
+    if not _RFC3339_UTC_RE.fullmatch(value):
+        raise ValueError("invalid legacy occurredAt")
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError("invalid legacy occurredAt") from error
 
 
 def validate_legacy(body: dict) -> None:
@@ -30,6 +43,7 @@ def validate_legacy(body: dict) -> None:
             or "\n" in value
         ):
             raise ValueError(f"invalid legacy {field}")
+    _validate_occurred_at(body["occurredAt"])
     if body.get("result") not in ("COMPLETED", "REJECTED"):
         raise ValueError("invalid legacy result")
     message = body.get("message")

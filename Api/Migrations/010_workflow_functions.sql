@@ -508,6 +508,10 @@ BEGIN
         v_lease_version := v_job.lease_version + 1;
         v_lease_until := clock_timestamp() + make_interval(secs => p_lease_ms / 1000.0);
 
+        UPDATE workflow.step_instance
+        SET state = 'RUNNING'
+        WHERE step_instance_id = v_job.step_instance_id;
+
         UPDATE workflow.workflow_job
         SET state = 'LEASED',
             lease_owner = p_owner,
@@ -576,12 +580,39 @@ BEGIN
                 'inputConstants', v_task.input_constants),
             'action', jsonb_build_object(
                 'outcomes', v_action.outcomes,
+                'requestSchema', v_action.request_schema,
                 'responseSchema', v_action.response_schema));
     END LOOP;
 
     RETURN v_results;
 END;
 $$;
+
+CREATE OR REPLACE FUNCTION workflow.assert_job_lease_step_running()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_step_state text;
+BEGIN
+    SELECT state INTO v_step_state
+    FROM workflow.step_instance
+    WHERE step_instance_id = NEW.step_instance_id;
+
+    IF v_step_state IS DISTINCT FROM 'RUNNING' THEN
+        RAISE EXCEPTION 'workflow.lease_inconsistent: job % leased while step % is in state %',
+            NEW.job_id, NEW.step_instance_id, COALESCE(v_step_state, '<missing>');
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_job_lease_step_running ON workflow.workflow_job;
+CREATE TRIGGER trg_job_lease_step_running
+    BEFORE UPDATE OF state ON workflow.workflow_job
+    FOR EACH ROW WHEN (NEW.state = 'LEASED')
+    EXECUTE FUNCTION workflow.assert_job_lease_step_running();
 
 CREATE OR REPLACE FUNCTION workflow.finish_job(
     p_job_id uuid, p_owner text, p_lease_version bigint, p_outcome text, p_result jsonb)
@@ -806,6 +837,7 @@ $$;
 ALTER FUNCTION workflow._advance(uuid,text) OWNER TO course_owner;
 ALTER FUNCTION workflow._apply_ready_signals(uuid,uuid,jsonb) OWNER TO course_owner;
 ALTER FUNCTION workflow._enter_step(uuid,text) OWNER TO course_owner;
+ALTER FUNCTION workflow.assert_job_lease_step_running() OWNER TO course_owner;
 ALTER FUNCTION workflow.publish_flow(jsonb) OWNER TO course_owner;
 ALTER FUNCTION workflow.activate_flow(text,integer) OWNER TO course_owner;
 ALTER FUNCTION workflow.start_process(text,text,jsonb) OWNER TO course_owner;
@@ -819,6 +851,7 @@ ALTER FUNCTION workflow.get_v1(jsonb,jsonb) OWNER TO course_owner;
 REVOKE ALL ON FUNCTION workflow._advance(uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION workflow._apply_ready_signals(uuid,uuid,jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION workflow._enter_step(uuid,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION workflow.assert_job_lease_step_running() FROM PUBLIC;
 REVOKE ALL ON FUNCTION workflow.publish_flow(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION workflow.activate_flow(text,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION workflow.start_process(text,text,jsonb) FROM PUBLIC;

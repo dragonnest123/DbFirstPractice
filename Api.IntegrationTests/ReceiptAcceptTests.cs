@@ -63,6 +63,46 @@ public sealed class ReceiptAcceptTests : PaymentPerimeterTestBase
     }
 
     [Fact]
+    public async Task InvalidOccurredAt_IsRejectedWithoutAnyMutation()
+    {
+        var (operationId, processId) = await CreateSubmittedAsync("PAYMENT_EXECUTION", "1000.00", "it-req-date");
+        await RunAutomaticStepAsync(processId, "validate_operation");
+        await RunAutomaticStepAsync(processId, "prepare_external_request");
+        var externalId = await ExternalIdAsync(operationId);
+        var messageId = "it-date-" + Guid.NewGuid().ToString("N")[..10];
+
+        foreach (var occurredAt in new[]
+                 {
+                     "2026-02-30T12:00:00Z",
+                     "2026-09-04T12:00:00+03:00",
+                     "2026-09-04T12:00:00",
+                     "2026-09-04"
+                 })
+        {
+            var body = $$"""{"externalRequestId":"{{externalId}}","messageId":"{{messageId}}","occurredAt":"{{occurredAt}}","outcome":"COMPLETED","providerPaymentId":"{{messageId}}","version":1}""";
+            var bodyHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
+            var result = JsonDocument.Parse(
+                await InvokeAsync(Fixture.SuperuserConnection, "receipt", "accept", 1,
+                    SignedContext("r", "11111111-1111-1111-1111-111111111119", bodyHash),
+                    body)).RootElement;
+            Assert.Equal("payload.invalid", result.GetProperty("code").GetString());
+        }
+
+        Assert.Equal("0", await Db.ScalarAsync(Fixture.SuperuserConnection,
+            $"SELECT count(*) FROM delivery.inbox WHERE message_id='{messageId}'"));
+        Assert.Equal("0", await Db.ScalarAsync(Fixture.SuperuserConnection,
+            $"SELECT count(*) FROM delivery.receipt WHERE message_id='{messageId}'"));
+        Assert.Equal("CREATED", await Db.ScalarAsync(Fixture.SuperuserConnection,
+            $"SELECT state FROM delivery.external_request WHERE external_request_id='{externalId}'"));
+        Assert.Equal("PENDING", await Db.ScalarAsync(Fixture.SuperuserConnection,
+            $"SELECT state FROM delivery.outbox WHERE external_request_id='{externalId}'"));
+        Assert.Equal("WAITING_SIGNAL", await Db.ScalarAsync(Fixture.SuperuserConnection,
+            $"SELECT state FROM workflow.process_instance WHERE process_id='{processId}'"));
+        Assert.Equal("PROCESSING", await Db.ScalarAsync(Fixture.SuperuserConnection,
+            $"SELECT status FROM payment.operations WHERE operation_id='{operationId}'"));
+    }
+
+    [Fact]
     public async Task UnknownExternalRequest_ReturnsNotFound()
     {
         var body = """{"externalRequestId":"unknown-ext","messageId":"m-unknown","occurredAt":"2026-09-04T12:00:00Z","outcome":"COMPLETED","providerPaymentId":"m-unknown","version":1}""";

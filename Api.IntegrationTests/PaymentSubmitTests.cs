@@ -35,6 +35,35 @@ public sealed class PaymentSubmitTests : PaymentPerimeterTestBase
     }
 
     [Fact]
+    public async Task ConcurrentDistinctKeySubmits_SingleProcessSingleTransitionSingleEvent()
+    {
+        var operationId = await CreateOperationAsync("PAYMENT_EXECUTION", "1000.00");
+
+        var tasks = Enumerable.Range(0, 20).Select(i =>
+            InvokeAsync(Fixture.SuperuserConnection, "payment", "submit", 1,
+                $$"""{"principal":"it-principal","requestId":"it-cc-{{i}}","correlationId":"11111111-1111-1111-1111-{{i:D12}}","scopes":["payment:write"]}""",
+                $$"""{"operationId":"{{operationId}}"}"""));
+        var results = await Task.WhenAll(tasks);
+
+        var processIds = new HashSet<string>();
+        foreach (var raw in results)
+        {
+            using var doc = JsonDocument.Parse(raw);
+            Assert.Equal("ok", doc.RootElement.GetProperty("status").GetString());
+            Assert.Equal("PROCESSING", doc.RootElement.GetProperty("outcome").GetString());
+            processIds.Add(doc.RootElement.GetProperty("result").GetProperty("processId").GetString()!);
+        }
+        Assert.Single(processIds);
+
+        Assert.Equal("1", await Db.ScalarAsync(Fixture.SuperuserConnection,
+            $"SELECT count(*) FROM payment.operation_events WHERE operation_id='{operationId}' AND event_type='OPERATION_SUBMITTED'"));
+        Assert.Equal("1", await Db.ScalarAsync(Fixture.SuperuserConnection,
+            $"SELECT count(*) FROM workflow.process_instance WHERE business_key='{operationId}'"));
+        Assert.Equal("PROCESSING", await Db.ScalarAsync(Fixture.SuperuserConnection,
+            $"SELECT status FROM payment.operations WHERE operation_id='{operationId}'"));
+    }
+
+    [Fact]
     public async Task Submit_BindsPaymentApprovalToReviewFlow()
     {
         var operationId = await CreateOperationAsync("PAYMENT_APPROVAL", "100000.00");

@@ -86,3 +86,30 @@ def test_occurred_at_preserved_as_raw_string() -> None:
     legacy["occurredAt"] = "2026-09-04T12:00:00.123Z"
     receipt = normalize_receipt(legacy)
     assert receipt["occurredAt"] == "2026-09-04T12:00:00.123Z"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-09-04",
+        "2026-09-04T12:00:00",
+        "2026-09-04T12:00Z",
+        "2026-09-04T12:00:00+00:00",
+        "2026-09-04T12:00:00+03:00",
+        "2026-09-04T12:00:00z",
+        "2026-09-04 12:00:00Z",
+        "2026-09-04T12:00:00.123",
+        "2026-02-30T12:00:00Z",
+        "2026-13-04T12:00:00Z",
+        "2026-09-04T25:00:00Z",
+        "2026-09-04T12:60:00Z",
+        "2026-09-04T12:00:61Z",
+        "not-a-date",
+        "2026-09-04T12:00:00Zextra",
+    ],
+)
+def test_occurred_at_rejects_non_rfc3339_utc(value: str) -> None:
+    bad = dict(LEGACY)
+    bad["occurredAt"] = value
+    with pytest.raises(ValueError):
+        normalize_receipt(bad)

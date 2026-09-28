@@ -68,6 +68,33 @@ public sealed class ReceiptSignatureHttpTests : PaymentPerimeterTestBase
         Assert.Equal("0", inbox);
     }
 
+    [Fact]
+    public async Task ReceiptAcceptImpossibleOccurredAt_Returns422_AndNoInbox()
+    {
+        var client = _factory.CreateClient();
+        var body = """{"externalRequestId":"http-unknown-external","messageId":"http-date-1","occurredAt":"2026-02-30T12:00:00Z","outcome":"COMPLETED","providerPaymentId":"http-date-1","version":1}""";
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/receipt/accept");
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {CreateToken("receipt-provider", "integration", "receipt:write")}");
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", "http-date-1");
+        request.Headers.TryAddWithoutValidation("X-Action-Version", "1");
+        using (var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(HmacSecret)))
+        {
+            var digest = Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
+            request.Headers.TryAddWithoutValidation("X-Provider-Signature", $"v1={digest}");
+        }
+        request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(422, (int)response.StatusCode);
+        using var parsed = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("payload.invalid", parsed.RootElement.GetProperty("code").GetString());
+
+        var inbox = await Db.ScalarAsync(Fixture.SuperuserConnection,
+            "SELECT count(*) FROM delivery.inbox WHERE message_id='http-date-1'");
+        Assert.Equal("0", inbox);
+    }
+
     private static HttpRequestMessage BuildReceiptRequest(bool sign)
     {
         var receipt = new
