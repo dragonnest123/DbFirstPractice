@@ -123,7 +123,14 @@ public sealed class WorkerLoopSchemaTests
     private async Task<(string JobState, string ErrorCode)> RunWorkerAndWaitForDeadAsync(string processId)
     {
         using var cts = new CancellationTokenSource();
-        var loop = new WorkerLoop(_db.WorkerConnection, "it-worker", "", 2000, 50, 1);
+        var loop = new WorkerLoop(
+            _db.WorkerConnection,
+            "it-worker",
+            new Shared.Services.FailpointController(null, false),
+            new Workflow.MetricsCounters(),
+            2000,
+            50,
+            1);
         var runTask = loop.RunAsync(cts.Token);
         try
         {

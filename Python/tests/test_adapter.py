@@ -7,7 +7,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app.adapter import _build_adapter
-from app.config import AdapterConfig
+from app.config import AdapterConfig, ObservabilityConfig
+from app.metrics import Registry
 
 LEGACY = {
     "providerPaymentId": "provider-123",
@@ -39,11 +40,14 @@ def _start_adapter(receipt_api_url: str) -> ThreadingHTTPServer:
         token="jwt-token",
         hmac_secret="hmac-secret",
         receipt_api_url=receipt_api_url,
+        observability=ObservabilityConfig(
+            host="0.0.0.0", port=8082, service="cap1", failpoint=None
+        ),
         host="127.0.0.1",
         port=0,
         api_timeout=2.0,
     )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _build_adapter(cfg))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _build_adapter(cfg, Registry(), {}))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -128,3 +132,30 @@ def test_adapter_wrong_capability_returns_404() -> None:
         assert response == b""
     finally:
         adapter.shutdown()
+
+
+def test_adapter_serves_observability_routes() -> None:
+    adapter = _start_adapter("http://127.0.0.1:1/api/receipt/accept")
+    base = f"http://127.0.0.1:{adapter.server_address[1]}"
+    try:
+        with urllib.request.urlopen(f"{base}/health/live", timeout=5) as response:
+            assert response.status == 200
+            assert json.loads(response.read())["status"] == "live"
+        with urllib.request.urlopen(f"{base}/metrics", timeout=5) as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"].startswith("application/openmetrics-text")
+            assert response.read().endswith(b"# EOF\n")
+    finally:
+        adapter.shutdown()
+
+
+def test_adapter_readiness_reports_unreachable_gateway() -> None:
+    upstream = _start_upstream()
+    adapter = _start_adapter(f"http://127.0.0.1:{upstream.server_address[1]}/api/receipt/accept")
+    base = f"http://127.0.0.1:{adapter.server_address[1]}"
+    try:
+        with urllib.request.urlopen(f"{base}/health/ready", timeout=5) as response:
+            assert json.loads(response.read())["status"] == "ready"
+    finally:
+        adapter.shutdown()
+        upstream.shutdown()

@@ -2,26 +2,42 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Json.Schema;
 using Npgsql;
+using Shared.Services;
+using Shared.Utils;
 
 namespace Workflow;
 
 public sealed class WorkerLoop
 {
+    public const string AfterJobClaimFailpoint = "after_job_claim";
+    public const string AfterActionBeforeFinishFailpoint = "after_action_before_finish";
+
+    private const string LeaseStalePrefix = "workflow.lease_stale";
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.General);
 
     private readonly string _connStr;
     private readonly string _owner;
-    private readonly string _failpoint;
     private readonly int _leaseMs;
     private readonly int _pollIntervalMs;
     private readonly int _batch;
     private readonly int _attemptTimeoutMs;
+    private readonly FailpointController _failpoints;
+    private readonly MetricsCounters _counters;
 
-    public WorkerLoop(string connStr, string owner, string failpoint, int leaseMs, int pollIntervalMs, int batch)
+    public WorkerLoop(
+        string connStr,
+        string owner,
+        FailpointController failpoints,
+        MetricsCounters counters,
+        int leaseMs,
+        int pollIntervalMs,
+        int batch)
     {
         _connStr = connStr;
         _owner = owner;
-        _failpoint = failpoint;
+        _failpoints = failpoints;
+        _counters = counters;
         _leaseMs = leaseMs;
         _pollIntervalMs = pollIntervalMs;
         _batch = batch;
@@ -30,8 +46,6 @@ public sealed class WorkerLoop
 
     public async Task RunAsync(CancellationToken stopping)
     {
-        Log("worker.started", new { owner = _owner, leaseMs = _leaseMs, pollIntervalMs = _pollIntervalMs });
-
         while (!stopping.IsCancellationRequested)
         {
             List<JsonObject>? claimed = null;
@@ -41,7 +55,7 @@ public sealed class WorkerLoop
             }
             catch (Exception ex)
             {
-                Log("worker.claim_failed", new { error = ex.Message });
+                Log("worker.claim_failed", new { error = FirstLine(ex.Message) });
             }
 
             if (claimed is null || claimed.Count == 0)
@@ -65,7 +79,7 @@ public sealed class WorkerLoop
                 }
                 catch (Exception ex)
                 {
-                    Log("worker.job_failed", new { jobId = Job(job, "jobId"), error = ex.Message });
+                    Log("worker.job_failed", new { jobId = Job(job, "jobId"), error = FirstLine(ex.Message) });
                 }
             }
         }
@@ -97,12 +111,10 @@ public sealed class WorkerLoop
         var processId = Job(job, "processId");
 
         Log("job.claimed", new { jobId, executionId, attemptId, owner = _owner });
+        _counters.RecordClaim();
 
-        if (_failpoint == "after_job_claim")
-        {
-            LogFailpoint("after_job_claim");
-            BlockForever();
-        }
+        // Boundary: the claim is committed, the action has not run yet.
+        _failpoints.Reach(AfterJobClaimFailpoint, jobId ?? _owner);
 
         var task = job["task"] as JsonObject ?? new JsonObject();
         var action = job["action"] as JsonObject ?? new JsonObject();
@@ -221,16 +233,23 @@ public sealed class WorkerLoop
                 return;
             }
 
-            if (_failpoint == "after_action_before_finish")
-            {
-                LogFailpoint("after_action_before_finish");
-                BlockForever();
-            }
+            // Boundary: the action effect and its contract validation are done,
+            // but the completion is still uncommitted.
+            _failpoints.Reach(AfterActionBeforeFinishFailpoint, jobId ?? _owner);
 
             await FinishJobAsync(conn, tx, job, outcome, result.ToJsonString(), linkedCts.Token);
             await tx.CommitAsync(linkedCts.Token);
+            _counters.RecordCompletion();
 
             Log("job.finished", new { jobId, executionId, outcome, owner = _owner });
+        }
+        catch (PostgresException ex) when (ex.MessageText.StartsWith(LeaseStalePrefix, StringComparison.Ordinal))
+        {
+            // The lease moved on: this replica owns nothing, so it must not write
+            // anything, not even a failure marker.
+            await RollbackAsync(tx);
+            _counters.RecordLeaseConflict();
+            Log("job.lease_conflict", new { jobId, executionId, owner = _owner });
         }
         catch (OperationCanceledException)
         {
@@ -238,10 +257,15 @@ public sealed class WorkerLoop
             Log("job.timeout", new { jobId, owner = _owner });
             await FailJobAsync(job, "workflow.timeout", true);
         }
+        catch (PostgresException ex) when (ex.MessageText.StartsWith("workflow.", StringComparison.Ordinal))
+        {
+            await RollbackAsync(tx);
+            Log("job.workflow_error", new { jobId, error = FirstLine(ex.MessageText), owner = _owner });
+        }
         catch (NpgsqlException ex)
         {
             await RollbackAsync(tx);
-            Log("job.db_failed", new { jobId, error = ex.Message });
+            Log("job.db_failed", new { jobId, error = FirstLine(ex.Message) });
         }
         finally
         {
@@ -346,11 +370,17 @@ public sealed class WorkerLoop
             cmd.Parameters.AddWithValue("r", retryable);
 
             await cmd.ExecuteScalarAsync();
+            _counters.RecordFailure();
             Log("job.failed", new { jobId = Job(job, "jobId"), errorCode, retryable, owner = _owner });
+        }
+        catch (PostgresException ex) when (ex.MessageText.StartsWith(LeaseStalePrefix, StringComparison.Ordinal))
+        {
+            _counters.RecordLeaseConflict();
+            Log("job.lease_conflict", new { jobId = Job(job, "jobId"), owner = _owner });
         }
         catch (Exception ex)
         {
-            Log("job.fail_failed", new { jobId = Job(job, "jobId"), error = ex.Message });
+            Log("job.fail_failed", new { jobId = Job(job, "jobId"), error = FirstLine(ex.Message) });
         }
     }
 
@@ -367,10 +397,11 @@ public sealed class WorkerLoop
         }
     }
 
-    private static void BlockForever()
+    private static string FirstLine(string message)
     {
-        while (true)
-            Thread.Sleep(TimeSpan.FromHours(1));
+        var index = message.IndexOf('\n');
+        var head = index < 0 ? message : message[..index];
+        return head.Length <= 200 ? head : head[..200];
     }
 
     private static string? Job(JsonObject job, string key) =>
@@ -388,24 +419,26 @@ public sealed class WorkerLoop
     private static int Int(JsonObject obj, string key) =>
         obj.TryGetPropertyValue(key, out var value) && value is not null ? value.GetValue<int>() : 0;
 
-    private void LogFailpoint(string name)
+    private void Log(string eventName, object? details)
     {
-        Console.Out.WriteLine(
-            $"{{\"event\":\"failpoint.reached\",\"name\":\"{name}\",\"instanceId\":\"{_owner}\"}}");
-        Console.Out.Flush();
-    }
-
-    private static void Log(string eventName, object details)
-    {
-        var payload = new JsonObject
-        {
-            ["ts"] = DateTimeOffset.UtcNow.ToString("O"),
-            ["event"] = eventName
-        };
+        var fields = new Dictionary<string, object?>();
         if (details is not null)
-            payload["details"] = JsonNode.Parse(JsonSerializer.Serialize(details, JsonOptions));
+        {
+            using var document = JsonDocument.Parse(JsonSerializer.Serialize(details, JsonOptions));
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                fields[property.Name] = property.Value.ValueKind switch
+                {
+                    JsonValueKind.String => property.Value.GetString(),
+                    JsonValueKind.Number => property.Value.GetDouble(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.Null => null,
+                    _ => property.Value.GetRawText()
+                };
+            }
+        }
 
-        Console.Out.WriteLine(payload.ToJsonString());
-        Console.Out.Flush();
+        StructuredLog.Write(eventName, fields);
     }
 }

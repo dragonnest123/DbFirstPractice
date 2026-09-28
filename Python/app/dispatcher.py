@@ -5,9 +5,15 @@ import time
 
 import psycopg
 
+from app import observability, structured_logging
 from app.config import DispatcherConfig, dispatcher_config
 from app.db import connect
+from app.failpoints import FailpointController
 from app.http_client import HttpError, post_json
+from app.metrics import Registry
+
+CLAIM_FAILPOINT = "after_outbox_claim"
+RESPONSE_FAILPOINT = "after_provider_response"
 
 
 def _provider_body(external_request_id: str, amount: str, currency: str) -> bytes:
@@ -45,13 +51,16 @@ def _succeed(
     outbox_id: str,
     lease_version: int,
     provider_payment_id: str,
-) -> None:
+) -> str | None:
     with conn.cursor() as cursor:
         cursor.execute(
             "SELECT delivery.succeed_outbox(%s, %s, %s, %s)",
             (outbox_id, cfg.owner, lease_version, provider_payment_id),
         )
-        cursor.fetchone()
+        result = cursor.fetchone()
+    if result and isinstance(result[0], str):
+        return None
+    return "lease.conflict"
 
 
 def _fail(
@@ -60,13 +69,16 @@ def _fail(
     outbox_id: str,
     lease_version: int,
     error_code: str,
-) -> None:
+) -> str | None:
     with conn.cursor() as cursor:
         cursor.execute(
             "SELECT delivery.fail_outbox(%s, %s, %s, %s)",
             (outbox_id, cfg.owner, lease_version, error_code),
         )
-        cursor.fetchone()
+        result = cursor.fetchone()
+    if result and isinstance(result[0], str):
+        return None
+    return "lease.conflict"
 
 
 def classify_response(status: int, body: bytes) -> tuple[str, str | None]:
@@ -90,7 +102,13 @@ def classify_response(status: int, body: bytes) -> tuple[str, str | None]:
     return f"http.{status}.terminal", None
 
 
-def _attempt(conn: psycopg.Connection, cfg: DispatcherConfig, row: tuple) -> None:
+def _attempt(
+    conn: psycopg.Connection,
+    cfg: DispatcherConfig,
+    row: tuple,
+    failpoints: FailpointController,
+    registry: Registry,
+) -> None:
     (
         outbox_id,
         lease_version,
@@ -106,77 +124,112 @@ def _attempt(conn: psycopg.Connection, cfg: DispatcherConfig, row: tuple) -> Non
         status, response_body, _ = post_json(
             f"{cfg.provider_url.rstrip('/')}/payments", body, headers, cfg.provider_timeout
         )
-    except HttpError:
-        _fail(conn, cfg, outbox_id, lease_version, "transport.error.retryable")
-        print(
-            json.dumps(
-                {"ts": time.time(), "event": "dispatcher.attempt", "outcome": "retryable", "error": "transport.error.retryable"},
-                separators=(",", ":"),
-            ),
-            flush=True,
+    except HttpError as error:
+        registry.increment("outbox_dispatch_attempts", labels={"outcome": "transport_error"})
+        conflict = _fail(conn, cfg, outbox_id, lease_version, "transport.error.retryable")
+        if conflict:
+            registry.increment("outbox_lease_conflicts")
+        structured_logging.log(
+            "outbox.attempt",
+            outcome="retryable",
+            errorCode="transport.error.retryable",
+            conflict=conflict,
         )
         return
+
+    failpoints.reach(RESPONSE_FAILPOINT, outbox_id)
 
     error_code, provider_payment_id = classify_response(status, response_body)
     if error_code is None:
-        _succeed(conn, cfg, outbox_id, lease_version, provider_payment_id)
-        print(
-            json.dumps(
-                {"ts": time.time(), "event": "dispatcher.attempt", "outcome": "delivered", "status": status},
-                separators=(",", ":"),
-            ),
-            flush=True,
+        conflict = _succeed(conn, cfg, outbox_id, lease_version, provider_payment_id)
+        if conflict:
+            registry.increment("outbox_lease_conflicts")
+            registry.increment("outbox_dispatch_attempts", labels={"outcome": "fenced"})
+        else:
+            registry.increment("outbox_dispatch_attempts", labels={"outcome": "delivered"})
+        structured_logging.log(
+            "outbox.attempt",
+            outcome="delivered",
+            providerStatus=status,
+            conflict=conflict,
         )
         return
-    _fail(conn, cfg, outbox_id, lease_version, error_code)
-    print(
-        json.dumps(
-            {"ts": time.time(), "event": "dispatcher.attempt", "outcome": "failed", "error": error_code, "status": status},
-            separators=(",", ":"),
-        ),
-        flush=True,
+
+    conflict = _fail(conn, cfg, outbox_id, lease_version, error_code)
+    if conflict:
+        registry.increment("outbox_lease_conflicts")
+        registry.increment("outbox_dispatch_attempts", labels={"outcome": "fenced"})
+    else:
+        registry.increment("outbox_dispatch_attempts", labels={"outcome": "failed"})
+    structured_logging.log(
+        "outbox.attempt",
+        outcome="failed",
+        errorCode=error_code,
+        providerStatus=status,
+        conflict=conflict,
     )
 
 
-def run_once(conn: psycopg.Connection, cfg: DispatcherConfig) -> int:
+def run_once(
+    conn: psycopg.Connection,
+    cfg: DispatcherConfig,
+    failpoints: FailpointController | None = None,
+    registry: Registry | None = None,
+) -> int:
+    failpoints = failpoints or FailpointController(None, False)
+    registry = registry or Registry()
     with conn.cursor() as cursor:
         cursor.execute("SELECT * FROM delivery.claim_outbox(%s, %s)", (cfg.owner, cfg.claim_batch))
         rows = cursor.fetchall()
+    registry.set("outbox_pending", len(rows))
+    if rows:
+        failpoints.reach(CLAIM_FAILPOINT, rows[0][0])
     for row in rows:
         try:
-            _attempt(conn, cfg, row)
+            _attempt(conn, cfg, row, failpoints, registry)
         except psycopg.Error as error:
-            print(
-                json.dumps(
-                    {"ts": time.time(), "event": "dispatcher.db_error", "error": str(error)},
-                    separators=(",", ":"),
-                ),
-                flush=True,
-            )
+            registry.increment("dispatcher_database_errors")
+            structured_logging.log("outbox.database_error", error=type(error).__name__)
+    registry.set("outbox_pending", 0)
     return len(rows)
+
+
+def _database_probe(cfg: DispatcherConfig):
+    def probe() -> None:
+        with connect(cfg.pg) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+
+    return probe
 
 
 def main() -> None:
     cfg = dispatcher_config()
-    print(
-        json.dumps(
-            {"ts": time.time(), "event": "dispatcher.started", "owner": cfg.owner},
-            separators=(",", ":"),
-        ),
-        flush=True,
+    failpoints = FailpointController.from_environment()
+    registry = Registry()
+    registry.set("process_start_time_seconds", time.time())
+    observability.serve(
+        registry,
+        {"postgres": observability.DependencyProbe("postgres", _database_probe(cfg))},
+        cfg.observability.service,
+        cfg.observability.host,
+        cfg.observability.port,
+    )
+    structured_logging.log(
+        "dispatcher.started",
+        owner=cfg.owner,
+        applicationName=cfg.pg.appname,
+        providerUrl=cfg.provider_url,
+        failpoint=failpoints.describe(),
     )
     while True:
         try:
             with connect(cfg.pg) as conn:
-                run_once(conn, cfg)
+                run_once(conn, cfg, failpoints, registry)
         except psycopg.Error as error:
-            print(
-                json.dumps(
-                    {"ts": time.time(), "event": "dispatcher.connection_error", "error": str(error)},
-                    separators=(",", ":"),
-                ),
-                flush=True,
-            )
+            registry.increment("dispatcher_database_errors")
+            structured_logging.log("dispatcher.connection_error", error=type(error).__name__)
         time.sleep(cfg.poll_interval)
 
 

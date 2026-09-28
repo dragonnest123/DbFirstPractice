@@ -6,6 +6,7 @@ public static class ErrorMapping
     {
         "access.denied" => 403,
         "action.not_found" => 404,
+        "diagnostics.trace_not_found" => 404,
         "operation.not_found" => 404,
         "receipt.signature_required" => 403,
         "signature.invalid" => 401,

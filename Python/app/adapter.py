@@ -4,14 +4,16 @@ import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from app import observability, structured_logging
 from app.config import AdapterConfig, adapter_config
 from app.http_client import HttpError, post_json
+from app.metrics import Registry
 from app.receipt import canonical_bytes, normalize_receipt, sign
 
 MAX_BODY_BYTES = 64 * 1024
 
 
-def _build_adapter(cfg: AdapterConfig):
+def _build_adapter(cfg: AdapterConfig, registry: Registry, probes: dict):
     class AdapterHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -24,7 +26,7 @@ def _build_adapter(cfg: AdapterConfig):
             self.end_headers()
 
         def _send_json(self, status: int, payload: dict) -> None:
-            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            body = observability.json_body(payload)
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -40,9 +42,23 @@ def _build_adapter(cfg: AdapterConfig):
             if body:
                 self.wfile.write(body)
 
+        def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+            resolved = observability.respond(
+                self.path.split("?", 1)[0],
+                registry,
+                probes,
+                cfg.observability.service,
+            )
+            if resolved is None:
+                self._send_empty(404)
+                return
+            status, content_type, body = resolved
+            self._send_raw(status, body, content_type)
+
         def do_POST(self) -> None:
             expected = f"/callbacks/provider-v02/{cfg.capability}"
             if self.path.split("?", 1)[0] != expected:
+                registry.increment("provider_callback_rejected", labels={"reason": "unknown_path"})
                 self._send_empty(404)
                 return
 
@@ -68,6 +84,7 @@ def _build_adapter(cfg: AdapterConfig):
             try:
                 receipt = normalize_receipt(legacy)
             except ValueError:
+                registry.increment("provider_callback_rejected", labels={"reason": "invalid"})
                 self._send_empty(400)
                 return
 
@@ -86,9 +103,16 @@ def _build_adapter(cfg: AdapterConfig):
                     cfg.receipt_api_url, body, headers, cfg.api_timeout
                 )
             except HttpError:
+                registry.increment("provider_callback_unavailable")
+                structured_logging.log("provider_callback.api_unavailable")
                 self._send_json(503, {"status": "error", "code": "dependency.unavailable"})
                 return
 
+            registry.increment(
+                "provider_callback_forwarded",
+                labels={"outcome": "accepted" if 200 <= status < 300 else "rejected"},
+            )
+            structured_logging.log("provider_callback.forwarded", apiStatus=status)
             self._send_raw(status, api_body, api_headers.get("Content-Type"))
 
     return AdapterHandler
@@ -96,14 +120,15 @@ def _build_adapter(cfg: AdapterConfig):
 
 def main() -> None:
     cfg = adapter_config()
-    handler = _build_adapter(cfg)
-    server = ThreadingHTTPServer((cfg.host, cfg.port), handler)
-    print(
-        json.dumps(
-            {"ts": time.time(), "event": "adapter.started", "port": cfg.port},
-            separators=(",", ":"),
-        ),
-        flush=True,
+    registry = Registry()
+    registry.set("process_start_time_seconds", time.time())
+    probes = {"gateway": observability.DependencyProbe("gateway", observability.tcp_probe(cfg.receipt_api_url))}
+    server = ThreadingHTTPServer((cfg.host, cfg.port), _build_adapter(cfg, registry, probes))
+    server.daemon_threads = True
+    structured_logging.log(
+        "adapter.started",
+        port=cfg.port,
+        receiptApiUrl=cfg.receipt_api_url,
     )
     try:
         server.serve_forever()

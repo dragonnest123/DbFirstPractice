@@ -17,8 +17,9 @@ public static class Program
         var publication = new PublicationService(publicationConn);
         var flows = new FlowService(publicationConn);
         var migrations = new MigrationService();
+        var deliveryPolicy = new DeliveryPolicyService();
 
-        var router = new CommandRouter("cli", "cli <action|flow|migration> ...", envelope, [
+        var router = new CommandRouter("cli", "cli <action|flow|migration|delivery> ...", envelope, [
             new CommandRouter("action", "action <validate|publish|list|activate|disable> ...", envelope, [
                 new ValidateActionCommand(envelope),
                 new PublishActionCommand(envelope, publication),
@@ -38,12 +39,21 @@ public static class Program
             ]),
             new CommandRouter("migration", "migration apply <directory>", envelope, [
                 new ApplyMigrationCommand(envelope, migrations)
+            ]),
+            new CommandRouter("delivery", "delivery <policy> ...", envelope, [
+                new CommandRouter("policy", "delivery policy apply", envelope, [
+                    new ApplyDeliveryPolicyCommand(envelope, deliveryPolicy)
+                ])
             ])
         ]);
 
+        // The compose `cli` service runs with no arguments: on start it re-applies
+        // the delivery policy, which is an idempotent upsert.
+        var effective = args.Length == 0 ? ["delivery", "policy", "apply"] : args;
+
         try
         {
-            return await router.RunAsync(args);
+            return await router.RunAsync(effective);
         }
         catch (Exception ex)
         {

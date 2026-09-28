@@ -3,20 +3,26 @@ using Api.Contracts.Dto;
 using Api.Utils;
 using Npgsql;
 using Shared.Models;
+using Shared.Services;
 
 namespace Api.Services;
 
 public sealed class ActionInvoker
 {
+    public const string AfterInboxSavedFailpoint = "after_inbox_saved";
+    public const string AfterManualDecisionFailpoint = "after_manual_decision";
+
     private static readonly TimeSpan RollbackTimeout = TimeSpan.FromSeconds(5);
 
     private readonly IdempotencyService _idempotency;
     private readonly DispatchService _dispatch;
+    private readonly FailpointController _failpoints;
 
-    public ActionInvoker(IdempotencyService idempotency, DispatchService dispatch)
+    public ActionInvoker(IdempotencyService idempotency, DispatchService dispatch, FailpointController failpoints)
     {
         _idempotency = idempotency;
         _dispatch = dispatch;
+        _failpoints = failpoints;
     }
 
     public async Task<IResult> InvokeAsync(RequestState s, ActionManifest entry, CancellationToken requestAborted)
@@ -83,7 +89,18 @@ public sealed class ActionInvoker
             if (s.IdempotencyScopeKey is not null)
                 await _idempotency.StoreResponseAsync(conn, tx, s.IdempotencyScopeKey, s.RequestId, invokeJson, invocationCts.Token);
 
+            // Boundary: the generic action runtime has produced its effect and the
+            // response has been validated, but nothing is committed yet.
+            if (s.Module == "workflow" && s.Action == "manual")
+                _failpoints.Reach(AfterManualDecisionFailpoint, s.RequestId);
+
             await tx.CommitAsync(invocationCts.Token);
+
+            // Boundary: the Inbox row, its receipt and the idempotency result are
+            // durable, while the caller has not seen a response yet.
+            if (s.Module == "receipt" && s.Action == "accept")
+                _failpoints.Reach(AfterInboxSavedFailpoint, s.RequestId);
+
             return Envelope.Ok(outcome!, result, s.CorrelationId, s.Version);
         }
         catch (OperationCanceledException)
