@@ -699,7 +699,9 @@ BEGIN
 END;
 $$;
 
--- Operations that exhausted automatic delivery attempts and still wait for a receipt.
+-- Operations that exhausted automatic delivery attempts, have waited at least
+-- v_stalled_after, and still wait for a receipt. The operation leaves the sample
+-- once the receipt is applied, because the WAIT_SIGNAL step is no longer WAITING.
 CREATE OR REPLACE FUNCTION diagnostics.stalled_v1(p_context jsonb, p_payload jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -709,6 +711,11 @@ AS $$
 DECLARE
     v_correlation text := p_context ->> 'correlationId';
     v_items jsonb;
+    -- A stalled wait is not merely the DEAD state: automatic delivery has to have
+    -- been exhausted for at least this threshold before the operation is reported.
+    -- The age is read from the stored dead_at, so the sample depends only on
+    -- persisted facts and never on what the caller happens to observe.
+    v_stalled_after CONSTANT interval := interval '10 seconds';
 BEGIN
     SELECT COALESCE(
         jsonb_agg(item ORDER BY (item ->> 'operationId')), '[]'::jsonb)
@@ -731,6 +738,7 @@ BEGIN
          AND s.step_type = 'WAIT_SIGNAL'
          AND s.state = 'WAITING'
         WHERE b.state = 'DEAD'
+          AND clock_timestamp() - COALESCE(b.dead_at, b.created_at) >= v_stalled_after
         ORDER BY o.operation_id
     ) stalled;
 

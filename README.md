@@ -93,6 +93,9 @@ Retry-политика живёт в PostgreSQL и применяется фун
 - Классификация: transport/timeout и HTTP `408/429/5xx` — retryable; остальные `4xx` — терминальные. Четвёртая неудача переводит строку в `DEAD` с `last_error_code`.
 - Lease-фенсинг одинаков для job и outbox: `finish_job`/`fail_job`/`succeed_outbox`/`fail_outbox` проверяют `lease_version` и отклоняют чужого владельца (`workflow.lease_stale`). Проигравший реплике worker не пишет ничего, включая маркер отказа, и только увеличивает счётчик конфликтов.
 - Failpoint-границы (только при `COURSE_TEST_PROFILE=1`): `after_job_claim`, `after_action_before_finish`, `after_outbox_claim`, `after_provider_response`, `after_inbox_saved`, `after_manual_decision`. Достижение границы печатает ровно `{"event":"failpoint.reached","name":"...","instanceId":"..."}` и блокирует процесс.
+- `diagnostics.stalled_v1` отдаёт операции, у которых доставка исчерпана и которые ждут квитанцию дольше порога. Правило: строка outbox в `state='DEAD'` (все автоматические попытки использованы), шаг `WAIT_SIGNAL` процесса всё ещё в `state='WAITING'`, и с сохранённого `delivery.outbox.dead_at` прошло не меньше `10 секунд`. Возраст считает только SQL от сохранённого факта, поэтому состав выборки не зависит от того, что успел увидеть вызывающий; чтение ничего не меняет и не создаёт повторной доставки. Операция уходит из выборки, как только квитанция применена: шаг перестаёт быть `WAITING`. Отдельный порог именно потому, что свежий `DEAD` — это нормальное завершение попыток, а не зависание.
+- Подключение к PostgreSQL из CLI повторяет только транспортные отказы (`Shared/Services/PostgresConnect.cs`): ограниченный бюджет попыток, без ретраев SQL-ошибок. Ошибка миграции или запроса доходит до вызывающего с первой попытки.
+- Healthcheck `postgres` в `compose.yaml` намеренно идёт по TCP (`pg_isready -h 127.0.0.1`): временный сервер инициализации слушает только Unix-сокет, и проверка по сокету объявляла бы базу готовой до того, как она начнёт принимать подключения.
 - Диагностика: `diagnostics.trace_v1` собирает полный след по одному идентификатору (operation/process/step/job/attempt/decision/correlation/request/externalRequest/message) обходом графа до неподвижной точки; ответ отдаёт `outcome=FOUND` с `dispatches`, `operation`, `process`, `steps`, `jobs`, `attempts`, `outbox`, `inbox`, `receipts`, `decisions`, `operationEvents`. Всё состояние читается из 17 стабильных views `autocheck` (роль `autocheck_reader`: `LOGIN NOINHERIT`, только SELECT, безEXECUTE на прикладных функциях).
 - Метрики: шесть бизнес-серий публикует только API (`workflow_jobs_ready`, `workflow_job_oldest_age_seconds`, `workflow_processes_waiting`, `outbox_pending`, `outbox_oldest_age_seconds`, `workflow_failures`); worker и Python добавляют свои process-local серии (`workflow_worker_*`, `outbox_dispatcher_*`, `inbox_reconciler_*`). Метки ограничены фиксированным набором значений.
 
@@ -128,6 +131,28 @@ python -m pytest Python/tests
 - `curl -s localhost:8080/health/ready`, `curl -s <service>:8080/metrics` внутри контура — живость, готовность и метрики;
 - `docker compose exec postgres psql -U postgres -d course -c "SELECT * FROM autocheck.outbox"` — стабильные views недели 4: `outbox`, `jobs`, `attempts`, `decisions`, `action_dispatches`, `signals`, `workflow_events` (плюс views недель 1–3);
 - `./course.sh flow get <process-id>` — компактное состояние процесса.
+
+Runbook по зависшим ожиданиям квитанции:
+
+```bash
+TOKEN=<jwt>   # курсор выдаётся отдельно, в репозитории его нет
+
+# 1. Полный след по операции из выборки stalled.
+curl -s -X POST localhost:8080/api/diagnostics/trace \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"identifier":"<operation-id>"}'
+
+# 2. Сама выборка: операции с исчерпанной доставкой, ждущие квитанцию дольше 10 секунд.
+curl -s -X POST localhost:8080/api/diagnostics/stalled \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}'
+
+# 3. Состояние доставки по операции, чтобы отличить исчерпанные попытки от активной доставки.
+docker compose exec postgres psql -U postgres -d course -c \
+  "SELECT external_request_id, state, attempts, last_error_code, dead_at, next_attempt_at
+     FROM delivery.outbox ORDER BY created_at DESC LIMIT 20"
+```
+
+Операция вне выборки, хотя `state='DEAD'`, — это нормально: порог ещё не прошёл. Если `dead_at` старше порога, а операции в выборке нет, проверьте шаг `WAIT_SIGNAL`: квитанция уже применена, и бизнес-результат смотрите в `diagnostics.trace`.
 
 ## Ограничения
 

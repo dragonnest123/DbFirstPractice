@@ -1,4 +1,5 @@
 using Npgsql;
+using Shared.Services;
 
 namespace Cli.Services;
 
@@ -66,8 +67,7 @@ public sealed class MigrationService
 
     public async Task<string?> GetMigrationChecksumAsync(string filename)
     {
-        await using var conn = new NpgsqlConnection(_connStr);
-        await conn.OpenAsync();
+        await using var conn = await PostgresConnect.OpenAsync(_connStr);
 
         await using var cmd = new NpgsqlCommand(
             "SELECT checksum FROM public.schema_migrations WHERE filename=@f", conn);
@@ -78,8 +78,7 @@ public sealed class MigrationService
 
     public async Task ApplyMigrationAsync(string filename, string checksum, string sql)
     {
-        await using var conn = new NpgsqlConnection(_connStr);
-        await conn.OpenAsync();
+        await using var conn = await PostgresConnect.OpenAsync(_connStr);
 
         await using var tx = await conn.BeginTransactionAsync();
 

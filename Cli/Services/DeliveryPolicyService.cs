@@ -1,5 +1,6 @@
 using Cli.Utils;
 using Npgsql;
+using Shared.Services;
 
 namespace Cli.Services;
 
@@ -34,8 +35,7 @@ public sealed class DeliveryPolicyService
 
     public async Task<System.Text.Json.JsonElement> ApplyAsync(Policy policy)
     {
-        await using var conn = new NpgsqlConnection(_connStr);
-        await conn.OpenAsync();
+        await using var conn = await PostgresConnect.OpenAsync(_connStr);
 
         await using var cmd = new NpgsqlCommand(
             "SELECT delivery.apply_outbox_policy(@a,@b,@c,@d,@e)", conn);
